@@ -169,7 +169,7 @@ async function testIpLatency(ip: string, port: number, timeout: number): Promise
  *
  * 为避免单次 DNS 偶发失败造成误判，默认随机取样例 IP 并行探测 10 次，
  * 只要有一次解析成功即认为当前环境可进行网页测速；
- * 全部失败才判定不可用，应切换到「本地 Agent 测速」兜底。
+ * 全部失败才判定当前浏览器环境不可用。
  *
  * @param sampleIps 页面同步到的 Cloudflare IP 段中随机生成的样例 IP 列表
  * @param attempts  探测次数，默认 10
@@ -180,7 +180,7 @@ const PROBE_FALLBACK_IPS = ['104.16.0.1', '172.67.0.1', '162.159.0.1', '162.158.
 /**
  * 浏览器端对指定 IPv4/端口执行下载测速。
  * 使用与浏览器延迟测速相同的 hex 泛解析域名，因此无需本地 Agent。
- * 只读取实际响应 Body 字节数，按 Mbps 返回。
+ * 使用 no-cors 计时；测试端点返回固定 bytes，因此无需读取跨域响应体即可计算 Mbps。
  */
 export async function testBrowserDownloadSpeed(
     ip: string,
@@ -190,50 +190,64 @@ export async function testBrowserDownloadSpeed(
     if (isIPv6(ip) || isDomainName(ip)) {
         return { downloadMbps: 0, downloadBytes: 0, downloadMs: 0, error: '浏览器测速目前仅支持 IPv4 IP' };
     }
+
     const hexIp = ipToHex(ip);
     if (!hexIp) {
         return { downloadMbps: 0, downloadBytes: 0, downloadMs: 0, error: 'IPv4 地址格式无效' };
     }
 
-    const bytes = Math.max(256 * 1024, Math.min(options.bytes ?? 10 * 1024 * 1024, 100 * 1024 * 1024));
+    // Cloudflare Pages 本身是 HTTPS 页面，因此浏览器直接测速时只允许 HTTPS 端口。
+    // 与 EDT / Cloudflare IP 优选思路一致：用 hex-ip 泛解析域名把请求路由到指定 IP，
+    // 再请求 Cloudflare 的 __down 测试端点。
+    const httpsPorts = new Set([443, 2053, 2083, 2087, 2096, 8443]);
+    if (!httpsPorts.has(port)) {
+        return {
+            downloadMbps: 0,
+            downloadBytes: 0,
+            downloadMs: 0,
+            error: `浏览器测速不支持 HTTP 端口 ${port}（HTTPS 页面会拦截混合内容），请使用 HTTPS 端口`,
+        };
+    }
+
+    const bytes = Math.max(512 * 1024, Math.min(options.bytes ?? 10 * 1024 * 1024, 100 * 1024 * 1024));
     const timeoutMs = Math.max(3000, options.timeoutMs ?? 15000);
     const host = `${hexIp}.ns.psb.kdns.fr`;
     const url = `https://${host}:${port}/__down?bytes=${bytes}&_t=${Date.now()}_${Math.random().toString(36).slice(2)}`;
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), timeoutMs);
     const start = performance.now();
-    let received = 0;
 
     try {
+        // 关键：使用 no-cors。测速只需要“请求完成所花时间”，不需要读取跨域响应体。
+        // 如果使用普通 cors fetch，目标端点没有 ACAO 时会直接被浏览器拦截，
+        // 这就是上一版“全部失败”的主要原因。
         const response = await fetch(url, {
             method: 'GET',
+            mode: 'no-cors',
             cache: 'no-store',
             signal: controller.signal,
-            headers: { 'Cache-Control': 'no-cache' },
+            credentials: 'omit',
         });
-        if (!response.ok) {
-            return { downloadMbps: 0, downloadBytes: 0, downloadMs: performance.now() - start, error: `HTTP ${response.status}` };
-        }
-
-        if (response.body) {
-            const reader = response.body.getReader();
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                if (value) received += value.byteLength;
-            }
-        } else {
-            const data = await response.arrayBuffer();
-            received = data.byteLength;
-        }
 
         const elapsedMs = Math.max(1, performance.now() - start);
-        const mbps = received > 0 ? (received * 8) / (elapsedMs / 1000) / 1_000_000 : 0;
-        return { downloadMbps: Number(mbps.toFixed(2)), downloadBytes: received, downloadMs: Math.round(elapsedMs) };
+        if (response.type !== 'opaque' && !response.ok) {
+            return { downloadMbps: 0, downloadBytes: 0, downloadMs: Math.round(elapsedMs), error: `HTTP ${response.status}` };
+        }
+
+        // __down?bytes=N 返回固定 N 字节；no-cors 无法读取 body，
+        // 所以使用请求参数中的已知字节数计算吞吐。
+        const mbps = (bytes * 8) / (elapsedMs / 1000) / 1_000_000;
+        return {
+            downloadMbps: Number(mbps.toFixed(2)),
+            downloadBytes: bytes,
+            downloadMs: Math.round(elapsedMs),
+        };
     } catch (error: any) {
         const elapsedMs = Math.max(1, performance.now() - start);
-        const message = error?.name === 'AbortError' ? `测速超时（>${Math.round(timeoutMs / 1000)}秒）` : (error?.message || '浏览器下载测速失败');
-        return { downloadMbps: 0, downloadBytes: received, downloadMs: Math.round(elapsedMs), error: message };
+        const message = error?.name === 'AbortError'
+            ? `测速超时（>${Math.round(timeoutMs / 1000)}秒）`
+            : '浏览器无法连接该 IP 的 HTTPS 测速端点';
+        return { downloadMbps: 0, downloadBytes: 0, downloadMs: Math.round(elapsedMs), error: message };
     } finally {
         window.clearTimeout(timer);
     }
