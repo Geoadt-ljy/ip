@@ -1,0 +1,4 @@
+fatal: detected dubious ownership in repository at '/storage/emulated/0/Geoadt/kgcfip-api-compatible-fixed/ip-main'
+To add an exception for this directory, call:
+
+	git config --global --add safe.directory /storage/emulated/0/Geoadt/kgcfip-api-compatible-fixed/ip-main
