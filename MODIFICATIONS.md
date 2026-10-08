@@ -10,3 +10,10 @@
 6. 新增 FFraud 纯净度 Pages Function 和结果页检测按钮。
 7. `wrangler.toml` 增加 `pages_build_output_dir = "dist"`，避免 Pages 的 Wrangler 配置警告。
 8. 更新 `public/local-agent.zip` 为增强后的 Agent。
+### 2026-10-09：下载测速与 IP 筛选增强
+- 修复本地 Agent 下载测速：测速计时从实际 HTTP 下载请求开始，取消下载阶段的错误空闲超时，并正确统计 HTTP body 字节。
+- 下载测速保留 Cloudflare `speed.cloudflare.com` 的 SNI/Host，可直接对目标 CF IP 测速。
+- 结果页新增“下载速度 ≥ X Mbps”筛选。
+- 结果页新增“纯净度 ≥ X/100”筛选；启用前可点击“检测纯净度”，未检测到纯净度的 IP 不会通过该筛选。
+- 纯净度检测前端自动按每批 100 个 IP 分批，避免超过后端单次上限。
+- `public/local-agent.zip` 已同步更新，网页下载的 Agent 与源码一致。

@@ -1,11 +1,11 @@
-import { useState, useEffect, useRef } from 'react';
+import { Fragment, useState, useEffect, useRef } from 'react';
 import { saveResults, getScenes, checkPurity } from '../api';
 import {
   ScanResult,
   getLatencyColor,
 } from '../utils/scanner';
 import { useToast } from './Toast';
-import { ListFilter, Save } from 'lucide-react';
+import { ListFilter, Save, ChevronDown, ChevronUp } from 'lucide-react';
 import { RegionDisplay } from './RegionDisplay';
 
 interface IpScannerResultsAndSaveProps {
@@ -19,6 +19,12 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
     const [ipsPerRegion, setIpsPerRegion] = useState<string>(String(DEFAULT_IPS_PER_REGION));
     const [ipsPerRegionError, setIpsPerRegionError] = useState<string>('');
     const [isLatencyFilterEnabled, setIsLatencyFilterEnabled] = useState(false);
+    const [isDownloadFilterEnabled, setIsDownloadFilterEnabled] = useState(false);
+    const [downloadFilterValue, setDownloadFilterValue] = useState<string>('10');
+    const [downloadFilterError, setDownloadFilterError] = useState<string>('');
+    const [isPurityFilterEnabled, setIsPurityFilterEnabled] = useState(false);
+    const [purityFilterValue, setPurityFilterValue] = useState<string>('90');
+    const [purityFilterError, setPurityFilterError] = useState<string>('');
     const [isRegionLimitEnabled, setIsRegionLimitEnabled] = useState(false);
     const [latencyFilterValue, setLatencyFilterValue] = useState<string>('300');
     const [latencyFilterError, setLatencyFilterError] = useState<string>('');
@@ -32,6 +38,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
     const [selectedPorts, setSelectedPorts] = useState<Set<string>>(new Set());
     const [purityMap, setPurityMap] = useState<Record<string, import('../api').PurityResult>>({});
     const [isCheckingPurity, setIsCheckingPurity] = useState(false);
+    const [expandedPurityIp, setExpandedPurityIp] = useState<string | null>(null);
     const filterInitialized = useRef(false);
 
     const uniqueRegions: string[] = Array.from(new Set(scanResults.map(r => r.colo))).filter((r): r is string => !!r).sort();
@@ -78,6 +85,14 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
     const isLatencyFormatValid = /^\d+$/.test(latencyTrim);
     const effectiveLatencyValue = isLatencyFormatValid ? parseInt(latencyTrim, 10) : 0;
 
+    const downloadTrim = downloadFilterValue.trim();
+    const isDownloadFormatValid = /^(?:\d+(?:\.\d+)?)$/.test(downloadTrim) && Number(downloadTrim) >= 0;
+    const effectiveDownloadValue = isDownloadFormatValid ? Number(downloadTrim) : 0;
+
+    const purityTrim = purityFilterValue.trim();
+    const isPurityFormatValid = /^\d+$/.test(purityTrim) && Number(purityTrim) >= 0 && Number(purityTrim) <= 100;
+    const effectivePurityValue = isPurityFormatValid ? Number(purityTrim) : 0;
+
     const ipsPerRegionTrim = ipsPerRegion.trim();
     const isIpsPerRegionFormatValid = /^\d+$/.test(ipsPerRegionTrim) && parseInt(ipsPerRegionTrim, 10) >= 1;
     const effectiveIpsPerRegion = isIpsPerRegionFormatValid ? parseInt(ipsPerRegionTrim, 10) : DEFAULT_IPS_PER_REGION;
@@ -105,33 +120,49 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
         return acc;
     }, {} as Record<string, number>);
 
-    const filteredResults = portFilteredResults.filter(r =>
+    const regionFilteredResults = portFilteredResults.filter(r =>
         r.colo ? selectedRegions.has(r.colo) : true
     );
 
-    let limitedResults = [...filteredResults];
+    const downloadFilteredResults = regionFilteredResults.filter(r =>
+        isDownloadFilterEnabled ? (Number(r.downloadMbps) > 0 && Number(r.downloadMbps) >= effectiveDownloadValue) : true
+    );
+
+    const purityFilteredResults = downloadFilteredResults.filter(r =>
+        isPurityFilterEnabled ? (purityMap[r.ip] && purityMap[r.ip].purityScore >= effectivePurityValue) : true
+    );
+
+    let limitedResults = [...purityFilteredResults];
     if (isRegionLimitEnabled) {
         const regionCountsForLimit: { [key: string]: number } = {};
-        limitedResults = filteredResults.filter(r => {
+        limitedResults = purityFilteredResults.filter(r => {
             const colo = r.colo || 'Unknown';
             regionCountsForLimit[colo] = (regionCountsForLimit[colo] || 0) + 1;
             return regionCountsForLimit[colo] <= effectiveIpsPerRegion;
         });
     }
 
+    const filteredResults = limitedResults;
+
     const { showToast } = useToast();
 
     const handlePurity = async () => {
-        const ips = Array.from(new Set(limitedResults.filter(r => !r.domain).map(r => r.ip)));
+        const ips = Array.from(new Set(scanResults.filter(r => !r.domain).map(r => r.ip)));
         if (ips.length === 0) {
             showToast('没有可检测的 IP', 'warning');
             return;
         }
         setIsCheckingPurity(true);
         try {
-            const data = await checkPurity(ips);
-            setPurityMap(data);
-            showToast(`纯净度检测完成：${Object.keys(data).length}/${ips.length}`, 'success');
+            // 后端单次最多检测 100 个 IP，这里自动分批，500/1000 个扫描结果也能完整检测。
+            const merged: Record<string, import('../api').PurityResult> = {};
+            for (let i = 0; i < ips.length; i += 100) {
+                const batch = ips.slice(i, i + 100);
+                const data = await checkPurity(batch);
+                Object.assign(merged, data);
+            }
+            setPurityMap(merged);
+            showToast(`纯净度检测完成：${Object.keys(merged).length}/${ips.length}`, 'success');
         } catch (e) {
             showToast(`纯净度检测失败：${e instanceof Error ? e.message : '未知错误'}`, 'error');
         } finally {
@@ -209,6 +240,62 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <input
+                                        id="download-filter-enable"
+                                        type="checkbox"
+                                        checked={isDownloadFilterEnabled}
+                                        onChange={(e) => {
+                                            if (e.target.checked && !isDownloadFormatValid) {
+                                                setDownloadFilterError('请输入有效的速度值');
+                                                return;
+                                            }
+                                            setDownloadFilterError('');
+                                            setIsDownloadFilterEnabled(e.target.checked);
+                                        }}
+                                        className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                    />
+                                    <label htmlFor="download-filter-enable" className="text-sm text-gray-600 dark:text-gray-300 cursor-pointer select-none">下载速度 ≥</label>
+                                    <input
+                                        id="download-filter-value"
+                                        type="text"
+                                        inputMode="decimal"
+                                        value={downloadFilterValue}
+                                        onChange={(e) => { setDownloadFilterValue(e.target.value.replace(/[^0-9.]/g, '')); if (downloadFilterError) setDownloadFilterError(''); }}
+                                        className="p-1 border rounded-md w-20 text-sm dark:bg-gray-600 dark:border-gray-500 dark:text-white disabled:bg-gray-200 dark:disabled:bg-gray-800"
+                                        disabled={!isDownloadFilterEnabled}
+                                    />
+                                    <span className="text-sm text-gray-600 dark:text-gray-300">Mbps</span>
+                                    {downloadFilterError && <span className="text-red-500 text-xs">{downloadFilterError}</span>}
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <input
+                                        id="purity-filter-enable"
+                                        type="checkbox"
+                                        checked={isPurityFilterEnabled}
+                                        onChange={(e) => {
+                                            if (e.target.checked && !isPurityFormatValid) {
+                                                setPurityFilterError('请输入 0-100 的纯净度');
+                                                return;
+                                            }
+                                            setPurityFilterError('');
+                                            setIsPurityFilterEnabled(e.target.checked);
+                                        }}
+                                        className="h-4 w-4 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                                    />
+                                    <label htmlFor="purity-filter-enable" className="text-sm text-gray-600 dark:text-gray-300 cursor-pointer select-none">纯净度 ≥</label>
+                                    <input
+                                        id="purity-filter-value"
+                                        type="text"
+                                        inputMode="numeric"
+                                        value={purityFilterValue}
+                                        onChange={(e) => { setPurityFilterValue(e.target.value.replace(/[^0-9]/g, '').slice(0, 3)); if (purityFilterError) setPurityFilterError(''); }}
+                                        className="p-1 border rounded-md w-16 text-sm dark:bg-gray-600 dark:border-gray-500 dark:text-white disabled:bg-gray-200 dark:disabled:bg-gray-800"
+                                        disabled={!isPurityFilterEnabled}
+                                    />
+                                    <span className="text-sm text-gray-600 dark:text-gray-300">/100</span>
+                                    {purityFilterError && <span className="text-red-500 text-xs">{purityFilterError}</span>}
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <input
                                         id="region-limit-enable"
                                         type="checkbox"
                                         checked={isRegionLimitEnabled}
@@ -238,6 +325,13 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                                 </div>
                             </div>
                         </div>
+
+                        {(isDownloadFilterEnabled || isPurityFilterEnabled) && (
+                            <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                                当前速度/纯净度筛选后：<span className="font-semibold text-gray-700 dark:text-gray-200">{purityFilteredResults.length}</span> 个结果
+                                {isPurityFilterEnabled && Object.keys(purityMap).length === 0 && <span className="ml-2 text-amber-600 dark:text-amber-400">请先点击“检测纯净度”</span>}
+                            </div>
+                        )}
 
                         <div className="flex items-center justify-between mb-2">
                             <h3 className="text-sm font-bold text-gray-700 dark:text-gray-200">按地区筛选</h3>
@@ -345,19 +439,69 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                             </tr>
                         </thead>
                         <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                            {limitedResults.map(({ ip, port, latency, colo, domain, downloadMbps }) => (
-                                <tr key={`${ip}:${port}`} className="hover:bg-gray-100 dark:hover:bg-gray-700">
-                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-900 dark:text-white">
-                                        {ip}
-                                        {domain && <span className="ml-2 px-1.5 py-0.5 text-[10px] rounded bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">域名</span>}
-                                    </td>
-                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{port}</td>
-                                    <td className={`px-6 py-4 whitespace-nowrap text-sm font-bold ${getLatencyColor(latency)}`}>{latency > -1 ? `${latency}ms` : 'N/A'}</td>
-                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{colo ? <RegionDisplay colo={colo} flagSize="sm" /> : '-'}</td>
-                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-blue-600 dark:text-blue-400">{downloadMbps && downloadMbps > 0 ? `${downloadMbps.toFixed(2)} Mbps` : '-'}</td>
-                                    <td className="px-6 py-4 whitespace-nowrap text-sm">{purityMap[ip] ? <span className={purityMap[ip].purityScore >= 90 ? 'text-green-600 dark:text-green-400' : purityMap[ip].purityScore >= 70 ? 'text-yellow-600 dark:text-yellow-400' : 'text-red-600 dark:text-red-400'}>{purityMap[ip].purityScore} / 100</span> : '-'}</td>
-                                </tr>
-                            ))}
+                            {limitedResults.map(({ ip, port, latency, colo, domain, downloadMbps }) => {
+                                const purity = purityMap[ip];
+                                const expanded = expandedPurityIp === `${ip}:${port}`;
+                                return (
+                                    <Fragment key={`${ip}:${port}`}>
+                                        <tr key={`${ip}:${port}`} className="hover:bg-gray-100 dark:hover:bg-gray-700">
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-900 dark:text-white">
+                                                {ip}
+                                                {domain && <span className="ml-2 px-1.5 py-0.5 text-[10px] rounded bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">域名</span>}
+                                            </td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{port}</td>
+                                            <td className={`px-6 py-4 whitespace-nowrap text-sm font-bold ${getLatencyColor(latency)}`}>{latency > -1 ? `${latency}ms` : 'N/A'}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{colo ? <RegionDisplay colo={colo} flagSize="sm" /> : '-'}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-blue-600 dark:text-blue-400">{downloadMbps && downloadMbps > 0 ? `${downloadMbps.toFixed(2)} Mbps` : '-'}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                                <div className="flex items-center gap-2">
+                                                    {purity ? <span className={purity.purityScore >= 90 ? 'text-green-600 dark:text-green-400' : purity.purityScore >= 70 ? 'text-yellow-600 dark:text-yellow-400' : 'text-red-600 dark:text-red-400'}>{purity.purityScore} / 100</span> : '-'}
+                                                    {purity && (
+                                                        <button type="button" title="查看纯净度详情" onClick={() => setExpandedPurityIp(expanded ? null : `${ip}:${port}`)} className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-500 dark:text-gray-300">
+                                                            {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            </td>
+                                        </tr>
+                                        {expanded && purity && (
+                                            <tr key={`${ip}:${port}:purity`} className="bg-gray-50 dark:bg-gray-750">
+                                                <td colSpan={6} className="px-6 pb-5 pt-2">
+                                                    <div className="rounded-lg border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 p-4">
+                                                        <div className="flex flex-wrap items-center gap-2 mb-4">
+                                                            <span className="text-sm font-semibold text-gray-700 dark:text-gray-200">纯净度详情</span>
+                                                            <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${purity.purityScore >= 90 ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300' : purity.purityScore >= 70 ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300' : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'}`}>{purity.purityLabel || (purity.purityScore >= 90 ? '高' : purity.purityScore >= 70 ? '中' : '低')}</span>
+                                                        </div>
+                                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                                                            <div><span className="text-gray-500 dark:text-gray-400">Fraud Score：</span><b>{purity.fraudScore}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">风险：</span><b>{purity.risk || '-'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">VPN：</span><b>{purity.vpn ? '是' : '否'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">Proxy：</span><b>{purity.proxy ? '是' : '否'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">Tor：</span><b>{purity.tor ? '是' : '否'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">Relay：</span><b>{purity.relay ? '是' : '否'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">数据中心：</span><b>{purity.isDatacenter ? '是' : '否'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">移动网络：</span><b>{purity.mobile ? '是' : '否'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">滥用者：</span><b>{purity.isAbuser ? '是' : '否'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">近期滥用：</span><b>{purity.recentAbuse ? '是' : '否'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">住宅代理：</span><b>{purity.residentialProxy ? '是' : '否'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">连接类型：</span><b>{purity.connectionType || '-'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">国家：</span><b>{purity.country || '-'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">地区：</span><b>{purity.region || '-'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">城市：</span><b>{purity.city || '-'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">ASN：</span><b>{purity.asn || '-'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">ISP：</span><b>{purity.isp || '-'}</b></div>
+                                                            <div className="md:col-span-2"><span className="text-gray-500 dark:text-gray-400">组织：</span><b>{purity.organization || purity.company || '-'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">置信度：</span><b>{purity.confidence || '-'}</b></div>
+                                                            <div className="md:col-span-3"><span className="text-gray-500 dark:text-gray-400">威胁标签：</span><b>{purity.threatTags.length ? purity.threatTags.join(', ') : '无'}</b></div>
+                                                            <div className="md:col-span-4"><span className="text-gray-500 dark:text-gray-400">原因：</span><b>{purity.reason || '无'}</b></div>
+                                                        </div>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        )}
+                                    </Fragment>
+                                );
+                            })}
                         </tbody>
                     </table>
                 </div>

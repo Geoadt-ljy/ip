@@ -257,6 +257,7 @@ export interface PurityResult {
     risk: string;
     reason: string;
     vpn: boolean;
+    mobile: boolean;
     proxy: boolean;
     tor: boolean;
     relay: boolean;
@@ -269,6 +270,8 @@ export interface PurityResult {
     region: string;
     city: string;
     company: string;
+    isp: string;
+    organization: string;
     asn: string;
     threatTags: string[];
     confidence: string;

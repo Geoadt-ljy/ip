@@ -318,7 +318,122 @@ function measureLatency(host, port, opt) {
   });
 }
 
-// ==================================================================\n// 下载测速：复用 CloudflareSpeedTest 的思路\n// 直接连接目标 IP，同时使用测速站点的 SNI/Host，统计固定时间内收到的字节数。\n// ==================================================================\nfunction measureDownloadSpeed(host, port, opt) {\n  return new Promise((resolve) => {\n    let parsed;\n    try { parsed = new URL(opt.downloadUrl); } catch (_) {\n      return resolve({ downloadMbps: 0, downloadBytes: 0, error: 'invalid download URL' });\n    }\n    if (parsed.protocol !== 'https:') {\n      return resolve({ downloadMbps: 0, downloadBytes: 0, error: 'download URL must use https' });\n    }\n\n    const started = Date.now();\n    const duration = Math.max(1, Number(opt.downloadSeconds) || 10) * 1000;\n    const ip = String(host).replace(/^\\[|\\]$/g, '');\n    const timerMs = duration + Math.max(5000, Number(opt.timeoutMs) || 2500);\n    let settled = false;\n    let socket;\n    let bytes = 0;\n    let headersDone = false;\n    let headerBuf = Buffer.alloc(0);\n\n    const finish = (error) => {\n      if (settled) return;\n      settled = true;\n      try { socket && socket.destroy(); } catch (_) {}\n      const elapsed = Math.max(1, Date.now() - started);\n      const seconds = Math.min(duration, elapsed) / 1000;\n      resolve({\n        downloadMbps: error && bytes === 0 ? 0 : (bytes * 8) / seconds / 1000000,\n        downloadBytes: bytes,\n        error: error ? String(error.message || error) : '',\n      });\n    };\n\n    const timer = setTimeout(() => finish(), timerMs);\n    try {\n      socket = tls.connect({\n        host: ip,\n        port: Number(port) || 443,\n        servername: parsed.hostname,\n        rejectUnauthorized: false,\n        ALPNProtocols: ['http/1.1'],\n      });\n      socket.setTimeout(Number(opt.timeoutMs) || 2500);\n      socket.on('timeout', () => finish(new Error('download timeout')));\n      socket.on('error', (e) => finish(e));\n      socket.on('data', (chunk) => {\n        if (!headersDone) {\n          headerBuf = Buffer.concat([headerBuf, chunk]);\n          const end = headerBuf.indexOf('\\r\\n\\r\\n');\n          if (end >= 0) {\n            headersDone = true;\n            bytes += headerBuf.length - end - 4;\n            headerBuf = null;\n          }\n        } else {\n          bytes += chunk.length;\n        }\n        if (Date.now() - started >= duration) finish();\n      });\n      socket.on('secureConnect', () => {\n        const path = `${parsed.pathname || '/'}${parsed.search || ''}`;\n        socket.write(\n          `GET ${path} HTTP/1.1\\r\\n` +\n          `Host: ${parsed.host}\\r\\n` +\n          `User-Agent: CloudflareSpeedTest-compatible/1.0\\r\\n` +\n          `Accept: */*\\r\\n` +\n          `Connection: close\\r\\n\\r\\n`\n        );\n      });\n    } catch (e) {\n      clearTimeout(timer);\n      finish(e);\n      return;\n    }\n    const oldFinish = finish;\n    const wrapped = () => { clearTimeout(timer); oldFinish(); };\n    // duration completion is handled by finish; timer is only a hard safety limit.\n    void wrapped;\n  });\n}\n\n// ==================================================================
+// ==================================================================
+// 下载测速：复用 CloudflareSpeedTest 的思路
+// 直接连接目标 IP，同时使用测速站点的 SNI/Host，统计固定时间内收到的字节数。
+// ==================================================================
+function measureDownloadSpeed(host, port, opt) {
+  return new Promise((resolve) => {
+    let parsed;
+    try { parsed = new URL(opt.downloadUrl); } catch (_) {
+      return resolve({ downloadMbps: 0, downloadBytes: 0, error: 'invalid download URL' });
+    }
+    if (parsed.protocol !== 'https:') {
+      return resolve({ downloadMbps: 0, downloadBytes: 0, error: 'download URL must use https' });
+    }
+
+    const ip = String(host).replace(/^\[|\]$/g, '');
+    const durationMs = Math.max(1, Number(opt.downloadSeconds) || 10) * 1000;
+    const connectTimeoutMs = Math.max(3000, Number(opt.timeoutMs) || 2500);
+    const hardTimeoutMs = durationMs + connectTimeoutMs + 5000;
+    const startedAt = process.hrtime.bigint();
+    let settled = false;
+    let socket = null;
+    let bytes = 0;
+    let headersDone = false;
+    let headerBuf = Buffer.alloc(0);
+    let statusCode = 0;
+    let hardTimer = null;
+    let durationTimer = null;
+
+    const elapsedSeconds = () => Number(process.hrtime.bigint() - startedAt) / 1e9;
+
+    const finish = (error = null) => {
+      if (settled) return;
+      settled = true;
+      if (hardTimer) clearTimeout(hardTimer);
+      if (durationTimer) clearTimeout(durationTimer);
+      try { if (socket) socket.destroy(); } catch (_) { /* noop */ }
+
+      // 只统计 HTTP body，不把响应头算进下载速度。
+      const elapsed = Math.max(0.001, elapsedSeconds());
+      const dataSeconds = Math.max(0.001, Math.min(durationMs / 1000, elapsed));
+      const mbps = bytes > 0 ? (bytes * 8) / dataSeconds / 1000000 : 0;
+      let message = error ? String(error.message || error) : '';
+      if (!message && statusCode && statusCode !== 200) message = `HTTP ${statusCode}`;
+      if (!message && !headersDone) message = 'download response headers not received';
+
+      resolve({
+        downloadMbps: Number(mbps.toFixed(2)),
+        downloadBytes: bytes,
+        error: message,
+      });
+    };
+
+    const onData = (chunk) => {
+      if (!headersDone) {
+        headerBuf = Buffer.concat([headerBuf, chunk]);
+        const end = headerBuf.indexOf('\r\n\r\n');
+        if (end === -1) return;
+        const head = headerBuf.slice(0, end).toString('latin1');
+        const lines = head.split('\r\n');
+        statusCode = parseInt((lines[0] || '').split(' ')[1], 10) || 0;
+        headersDone = true;
+        bytes += headerBuf.length - end - 4;
+        headerBuf = Buffer.alloc(0);
+      } else {
+        bytes += chunk.length;
+      }
+
+      if (elapsedSeconds() * 1000 >= durationMs) finish();
+    };
+
+    try {
+      socket = tls.connect({
+        host: ip,
+        port: Number(port) || 443,
+        // CF IP 测速必须使用 speed.cloudflare.com 的 SNI。
+        servername: parsed.hostname,
+        rejectUnauthorized: false,
+        ALPNProtocols: ['http/1.1'],
+      });
+
+      socket.setTimeout(connectTimeoutMs);
+      socket.on('timeout', () => finish(new Error('download connection timeout')));
+      socket.on('error', (e) => finish(e));
+      socket.on('data', onData);
+
+      socket.on('secureConnect', () => {
+        // TLS 建连成功后关闭空闲超时，避免下载阶段短暂无数据被误判为连接失败。
+        socket.setTimeout(0);
+        const requestPath = `${parsed.pathname || '/'}${parsed.search || ''}`;
+        const hostHeader = parsed.hostname + (parsed.port ? `:${parsed.port}` : '');
+        socket.write(
+          `GET ${requestPath} HTTP/1.1\r\n` +
+          `Host: ${hostHeader}\r\n` +
+          `User-Agent: kgcfip-agent/${VERSION}\r\n` +
+          `Accept: */*\r\n` +
+          `Accept-Encoding: identity\r\n` +
+          `Cache-Control: no-cache\r\n` +
+          `Connection: close\r\n\r\n`
+        );
+        // 只从实际发出 HTTP 下载请求后开始计算测速时长。
+        durationTimer = setTimeout(() => finish(), durationMs);
+      });
+
+      socket.on('close', () => {
+        if (!settled) finish();
+      });
+    } catch (e) {
+      finish(e);
+      return;
+    }
+
+    hardTimer = setTimeout(() => finish(new Error('download hard timeout')), hardTimeoutMs);
+  });
+}
+
+// ==================================================================
 // 并发池（支持中途停止）
 // ==================================================================
 async function runPool(items, concurrency, worker, shouldStop) {
