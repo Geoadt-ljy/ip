@@ -176,6 +176,69 @@ async function testIpLatency(ip: string, port: number, timeout: number): Promise
  */
 const PROBE_FALLBACK_IPS = ['104.16.0.1', '172.67.0.1', '162.159.0.1', '162.158.0.1', '188.114.96.1', '108.162.192.1'];
 
+
+/**
+ * 浏览器端对指定 IPv4/端口执行下载测速。
+ * 使用与浏览器延迟测速相同的 hex 泛解析域名，因此无需本地 Agent。
+ * 只读取实际响应 Body 字节数，按 Mbps 返回。
+ */
+export async function testBrowserDownloadSpeed(
+    ip: string,
+    port: number,
+    options: { bytes?: number; timeoutMs?: number } = {}
+): Promise<{ downloadMbps: number; downloadBytes: number; downloadMs: number; error?: string }> {
+    if (isIPv6(ip) || isDomainName(ip)) {
+        return { downloadMbps: 0, downloadBytes: 0, downloadMs: 0, error: '浏览器测速目前仅支持 IPv4 IP' };
+    }
+    const hexIp = ipToHex(ip);
+    if (!hexIp) {
+        return { downloadMbps: 0, downloadBytes: 0, downloadMs: 0, error: 'IPv4 地址格式无效' };
+    }
+
+    const bytes = Math.max(256 * 1024, Math.min(options.bytes ?? 10 * 1024 * 1024, 100 * 1024 * 1024));
+    const timeoutMs = Math.max(3000, options.timeoutMs ?? 15000);
+    const host = `${hexIp}.ns.psb.kdns.fr`;
+    const url = `https://${host}:${port}/__down?bytes=${bytes}&_t=${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    const start = performance.now();
+    let received = 0;
+
+    try {
+        const response = await fetch(url, {
+            method: 'GET',
+            cache: 'no-store',
+            signal: controller.signal,
+            headers: { 'Cache-Control': 'no-cache' },
+        });
+        if (!response.ok) {
+            return { downloadMbps: 0, downloadBytes: 0, downloadMs: performance.now() - start, error: `HTTP ${response.status}` };
+        }
+
+        if (response.body) {
+            const reader = response.body.getReader();
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (value) received += value.byteLength;
+            }
+        } else {
+            const data = await response.arrayBuffer();
+            received = data.byteLength;
+        }
+
+        const elapsedMs = Math.max(1, performance.now() - start);
+        const mbps = received > 0 ? (received * 8) / (elapsedMs / 1000) / 1_000_000 : 0;
+        return { downloadMbps: Number(mbps.toFixed(2)), downloadBytes: received, downloadMs: Math.round(elapsedMs) };
+    } catch (error: any) {
+        const elapsedMs = Math.max(1, performance.now() - start);
+        const message = error?.name === 'AbortError' ? `测速超时（>${Math.round(timeoutMs / 1000)}秒）` : (error?.message || '浏览器下载测速失败');
+        return { downloadMbps: 0, downloadBytes: received, downloadMs: Math.round(elapsedMs), error: message };
+    } finally {
+        window.clearTimeout(timer);
+    }
+}
+
 export async function probeBrowserAvailable(sampleIps?: string[], attempts = 10): Promise<boolean> {
     const tasks = Array.from({ length: attempts }, async (_, i) => {
         const ip = sampleIps?.[i] ?? PROBE_FALLBACK_IPS[Math.floor(Math.random() * PROBE_FALLBACK_IPS.length)];

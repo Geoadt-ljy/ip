@@ -701,6 +701,23 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
                                 </div>
                             </div>
                         )}
+                        <div className="rounded-lg border border-blue-200 dark:border-blue-700/50 bg-blue-50 dark:bg-blue-900/20 px-4 py-3">
+                            <div className="flex items-start gap-2.5">
+                                <Gauge className="w-4 h-4 text-blue-500 flex-none mt-0.5" />
+                                <div className="text-sm text-blue-800 dark:text-blue-200">
+                                    <p className="font-medium">需要下载测速？</p>
+                                    <p className="mt-1">下载测速由本地 Agent 执行，可避免浏览器跨域和 TLS SNI 限制。</p>
+                                    <button
+                                        type="button"
+                                        onClick={() => setActiveTab('local')}
+                                        disabled={isScanning || isPreparing}
+                                        className="mt-2 inline-flex items-center rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                                    >
+                                        切换到本地测速并设置下载测速 →
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
                         {!browserChecking && browserHealthy === false && (
                             <div className="flex items-start gap-2.5 rounded-lg border border-orange-200 dark:border-orange-700/50 bg-orange-50 dark:bg-orange-900/20 px-4 py-3">
                                 <AlertTriangle className="w-4 h-4 text-orange-500 flex-none mt-0.5" />
