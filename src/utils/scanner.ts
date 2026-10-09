@@ -276,7 +276,7 @@ export async function testBrowserPacketLoss(
     const attempts = Math.max(5, Math.min(20, Math.floor(options.attempts ?? 10)));
     const timeoutMs = Math.max(1500, Math.min(8000, options.timeoutMs ?? 3000));
     const template = (options.urlTemplate || 'https://{hexip}.ns.psb.kdns.fr:{port}/ip.json').trim();
-    const urlBase = template.replaceAll('{ip}', ip).replaceAll('{hexip}', hexIp).replaceAll('{port}', String(port));
+    const urlBase = template.replace(/\{ip\}/g, ip).replace(/\{hexip\}/g, hexIp).replace(/\{port\}/g, String(port));
     let parsedUrl: URL;
     try { parsedUrl = new URL(urlBase); } catch {
         return { packetLoss: 100, sent: 0, received: 0, error: '探测地址无效；请使用 HTTPS URL' };
