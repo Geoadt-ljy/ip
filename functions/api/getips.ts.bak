@@ -136,30 +136,10 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         const formattedResults = allItems.map(item => {
             const region = item.colo ? getColoName(item.colo) : '未知';
             const alias = `${region}|${item.sceneName}`;
-            let line = `${item.ip}:${item.port}#${alias}|${item.latency}ms`;
-
-            const speed = Number(item.downloadMbps);
-            if (Number.isFinite(speed) && speed > 0) {
-                line += `|下载:${speed.toFixed(2)}Mbps`;
-            }
-
-            const purityScore = item.purity?.purityScore;
-            if (typeof purityScore === 'number' && Number.isFinite(purityScore) && purityScore >= 0 && purityScore <= 100) {
-                line += `|纯净度:${purityScore}/100`;
-            }
-
+            const line = `${item.ip}:${item.port}#${alias}|${item.latency}ms`;
             return line;
         });
-                line += `|下载:${speed.toFixed(2)}Mbps`;
-            }
-
-            const purityScore = item.purity?.purityScore;
-            if (typeof purityScore === 'number' && Number.isFinite(purityScore) && purityScore >= 0 && purityScore <= 100) {
-                line += `|纯净度:${purityScore}/100`;
-            }
-
-            return line;
-        });
+        
         return new Response(formattedResults.join('\n'), {
             headers: {
                 'Content-Type': 'text/plain; charset=utf-8',
