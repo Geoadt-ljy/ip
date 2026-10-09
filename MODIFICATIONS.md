@@ -23,3 +23,10 @@
 - 删除自动丢包探测队列和 100 个 IP 上限。
 - 延迟扫描结果就绪后自动勾选所有 IPv4 地址，但不自动发送探测请求。
 - 用户点击“丢包率测试”后，才对所选 IP 开始测试；可手动取消/补选。
+
+
+## 2026-10-09 follow-up
+- Added shared IPv4 checkbox selection for browser download testing, purity checks, and optional selected-only KV saving.
+- Added a combined “一键测速 + 纯净度” action.
+- Browser-measured download speed and purity results are saved as optional fields without changing the existing `IP:port#region|scene|latency` line format. TXT exports append `|下载:xxMbps|纯净度:xx/100` after the original comment fields; CSV adds two optional columns.
+- Added Pages `_headers` rules to prevent stale HTML/cache from making the normal browser show a blank page after deployments.

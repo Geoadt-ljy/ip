@@ -14,6 +14,8 @@ interface SavedIpData {
     latency: number;
     colo?: string;
     domain?: boolean; // 是否为域名源
+    downloadMbps?: number;
+    purity?: { purityScore?: number; purityLabel?: string };
 }
 interface FlatIpItem extends SavedIpData {
     sceneName: string;
@@ -121,7 +123,7 @@ export function SavedIpList() {
             return;
         }
 
-        const headers = ['IP地址', '端口', '延迟(ms)', '地区代码', '地区名称', '场景'];
+        const headers = ['IP地址', '端口', '延迟(ms)', '地区代码', '地区名称', '场景', '下载速度(Mbps)', '纯净度(/100)'];
         const csvContent = [
             headers.join(','),
             ...filteredItemsSorted.map(item => [
@@ -131,6 +133,8 @@ export function SavedIpList() {
                 item.colo || '',
                 getColoName(item.colo || ''),
                 item.sceneName,
+                typeof item.downloadMbps === 'number' && item.downloadMbps > 0 ? item.downloadMbps.toFixed(2) : '',
+                typeof item.purity?.purityScore === 'number' ? item.purity.purityScore : '',
             ].map(field => {
                 const stringField = String(field);
                 // Escape quotes and wrap in quotes if contains comma, quote or newline
@@ -164,7 +168,9 @@ export function SavedIpList() {
                 const regionName = getColoName(item.colo || '');
                 const sceneName = item.sceneName;
                 const latency = `${item.latency}ms`;
-                const comment = `${regionName}|${sceneName}|${latency}`;
+                const speedComment = typeof item.downloadMbps === 'number' && item.downloadMbps > 0 ? `|下载:${item.downloadMbps.toFixed(2)}Mbps` : '';
+                const purityComment = typeof item.purity?.purityScore === 'number' ? `|纯净度:${item.purity.purityScore}/100` : '';
+                const comment = `${regionName}|${sceneName}|${latency}${speedComment}${purityComment}`;
                 txtContent += `${item.ip}:${item.port}#${comment}\n`;
             }
 
@@ -195,7 +201,9 @@ export function SavedIpList() {
             const regionName = getColoName(item.colo || '').replace(/^(\p{Regional_Indicator}+)\s+/u, '$1');
             const sceneName = item.sceneName;
             const latency = `${item.latency}ms`;
-            const comment = `${regionName}|${sceneName}|${latency}`;
+            const speedComment = typeof item.downloadMbps === 'number' && item.downloadMbps > 0 ? `|下载:${item.downloadMbps.toFixed(2)}Mbps` : '';
+            const purityComment = typeof item.purity?.purityScore === 'number' ? `|纯净度:${item.purity.purityScore}/100` : '';
+            const comment = `${regionName}|${sceneName}|${latency}${speedComment}${purityComment}`;
             txtContent += `${item.ip}:${item.port}#${comment}\n`;
         }
 
@@ -302,13 +310,15 @@ export function SavedIpList() {
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">地区代码</th>
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">地区</th>
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">场景</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">下载速度</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">纯净度</th>
                         </tr>
                     </thead>
                     <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                         {loading ? (
-                            <tr><td colSpan={7} className="px-4 py-4 text-center text-gray-500">加载中...</td></tr>
+                            <tr><td colSpan={9} className="px-4 py-4 text-center text-gray-500">加载中...</td></tr>
                         ) : filteredItems.length === 0 ? (
-                            <tr><td colSpan={7} className="px-4 py-4 text-center text-gray-500">暂无数据</td></tr>
+                            <tr><td colSpan={9} className="px-4 py-4 text-center text-gray-500">暂无数据</td></tr>
                         ) : (
                             filteredItemsSorted.map((item) => (
                                 <tr key={`${item.ip}-${item.port}-${item.sceneName}`} className="hover:bg-gray-50 dark:hover:bg-gray-700">
@@ -331,6 +341,8 @@ export function SavedIpList() {
                                     <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{item.colo || '-'}</td>
                                     <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{item.colo ? <RegionDisplay colo={item.colo} flagSize="sm" /> : '-'}</td>
                                     <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{item.sceneName}</td>
+                                    <td className="px-4 py-2 whitespace-nowrap text-sm font-semibold text-blue-600 dark:text-blue-400">{typeof item.downloadMbps === 'number' && item.downloadMbps > 0 ? `${item.downloadMbps.toFixed(2)} Mbps` : '-'}</td>
+                                    <td className="px-4 py-2 whitespace-nowrap text-sm font-semibold text-emerald-600 dark:text-emerald-400">{typeof item.purity?.purityScore === 'number' ? `${item.purity.purityScore}/100` : '-'}</td>
                                 </tr>
                             ))
                         )}

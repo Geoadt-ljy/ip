@@ -50,6 +50,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
     const [isPacketLossTesting, setIsPacketLossTesting] = useState(false);
     const [packetLossDone, setPacketLossDone] = useState(0);
     const [packetLossUrlTemplate, setPacketLossUrlTemplate] = useState('https://{hexip}.ns.psb.kdns.fr:{port}/ip.json');
+    const [saveSelectedOnly, setSaveSelectedOnly] = useState(true);
     const lastAutoSelectedResults = useRef<string>('');
     const filterInitialized = useRef(false);
 
@@ -233,6 +234,18 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
         }
     };
 
+    const handleCombinedSpeedPurityTest = async () => {
+        if (selectedVisibleSpeedKeys.length === 0) {
+            showToast('请先勾选一个或多个 IPv4 IP', 'warning');
+            return;
+        }
+        try {
+            await Promise.all([handleBrowserSpeedTest(), handlePurity()]);
+        } catch (error) {
+            showToast(`联合测试发生错误：${error instanceof Error ? error.message : '未知错误'}`, 'error');
+        }
+    };
+
     const handlePacketLossTest = async () => {
         const targets = filteredResults.filter(r => !r.domain && selectedSpeedTargets.has(speedKey(r)));
         if (targets.length === 0) {
@@ -263,9 +276,9 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
     };
 
     const handlePurity = async () => {
-        const ips = Array.from(new Set(scanResults.filter(r => !r.domain).map(r => r.ip)));
+        const ips = Array.from(new Set(filteredResults.filter(r => !r.domain && selectedSpeedTargets.has(speedKey(r))).map(r => r.ip)));
         if (ips.length === 0) {
-            showToast('没有可检测的 IP', 'warning');
+            showToast('请先勾选一个或多个可检测的 IPv4 IP', 'warning');
             return;
         }
         setIsCheckingPurity(true);
@@ -287,8 +300,11 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
     };
 
     const handleSave = async () => {
-        if (filteredResults.length === 0) {
-            showToast('没有可保存的结果。', 'warning');
+        const resultsForSave = saveSelectedOnly
+            ? limitedResults.filter(r => !r.domain && selectedSpeedTargets.has(speedKey(r)))
+            : limitedResults;
+        if (resultsForSave.length === 0) {
+            showToast(saveSelectedOnly ? '请先勾选要保存到 KV 的 IPv4 IP，或取消“仅保存勾选 IP”。' : '没有可保存的结果。', 'warning');
             return;
         }
 
@@ -299,9 +315,18 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
 
         setIsSaving(true);
         try{
-            const dataToSave = limitedResults.map(({ isAvailable, ...rest }) => rest);
+            const dataToSave = resultsForSave.map((result) => {
+                const { isAvailable, ...rest } = result;
+                const measuredSpeed = browserSpeedMap[speedKey(result)];
+                const measuredPurity = purityMap[result.ip] || result.purity;
+                return {
+                    ...rest,
+                    ...(typeof measuredSpeed === 'number' && measuredSpeed > 0 ? { downloadMbps: measuredSpeed } : {}),
+                    ...(measuredPurity ? { purity: measuredPurity } : {}),
+                };
+            });
             await saveResults(sceneName.trim(), dataToSave as ScanResult[], saveMode);
-            showToast(`场景 "${sceneName.trim()}" 保存成功！\n共 ${limitedResults.length} 个IP/域名\n模式: ${saveMode === 'overwrite' ? '覆盖' : '追加'}`, 'success');
+            showToast(`场景 "${sceneName.trim()}" 保存成功！\n共 ${resultsForSave.length} 个IP/域名\n模式: ${saveMode === 'overwrite' ? '覆盖' : '追加'}`, 'success');
             if (onSaveSuccess) onSaveSuccess();
         } catch (error) {
             console.error('Failed to save results:', error);
@@ -323,9 +348,10 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                     <div className="p-3 mb-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
                         <div className="flex items-center gap-4 mb-4 pb-3 border-b border-gray-200 dark:border-gray-600">
                             <div className="flex items-center gap-4 flex-wrap">
-                                <h3 className="text-sm font-bold text-gray-700 dark:text-gray-200">筛选与操作:</h3>
-                                <button onClick={() => void handlePurity()} disabled={isCheckingPurity} className="px-3 py-1 text-xs font-medium rounded-full bg-emerald-100 text-emerald-700 hover:bg-emerald-200 disabled:opacity-50 dark:bg-emerald-900/40 dark:text-emerald-300">{isCheckingPurity ? '检测中...' : '检测纯净度'}</button>
+                                <h3 className="text-sm font-bold text-gray-700 dark:text-gray-200">筛选与操作（勾选项共用于测速、纯净度检测和 KV 保存）:</h3>
+                                <button onClick={() => void handlePurity()} disabled={isCheckingPurity || selectedVisibleSpeedKeys.length === 0} className="px-3 py-1 text-xs font-medium rounded-full bg-emerald-100 text-emerald-700 hover:bg-emerald-200 disabled:opacity-50 dark:bg-emerald-900/40 dark:text-emerald-300">{isCheckingPurity ? '检测中...' : `检测勾选项纯净度 (${selectedVisibleSpeedKeys.length})`}</button>
                                 <button onClick={() => void handleBrowserSpeedTest()} disabled={isBrowserSpeedTesting || selectedVisibleSpeedKeys.length === 0} className="px-3 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-700 hover:bg-blue-200 disabled:opacity-50 dark:bg-blue-900/40 dark:text-blue-300">{isBrowserSpeedTesting ? `测速中 ${browserSpeedDone}/${selectedVisibleSpeedKeys.length}` : `浏览器测速 (${selectedVisibleSpeedKeys.length})`}</button>
+                                <button onClick={() => void handleCombinedSpeedPurityTest()} disabled={isBrowserSpeedTesting || isCheckingPurity || selectedVisibleSpeedKeys.length === 0} className="px-3 py-1 text-xs font-medium rounded-full bg-violet-100 text-violet-700 hover:bg-violet-200 disabled:opacity-50 dark:bg-violet-900/40 dark:text-violet-300">一键测速 + 纯净度</button>
                                 <button onClick={() => void handlePacketLossTest()} disabled={isPacketLossTesting || selectedVisibleSpeedKeys.length === 0} title="每个 IP 发送 10 次 HTTPS 探测；这不是 ICMP ping" className="px-3 py-1 text-xs font-medium rounded-full bg-amber-100 text-amber-800 hover:bg-amber-200 disabled:opacity-50 dark:bg-amber-900/40 dark:text-amber-300">{isPacketLossTesting ? `丢包测试 ${packetLossDone}/${selectedVisibleSpeedKeys.length}` : `丢包率测试 (${selectedVisibleSpeedKeys.length})`}</button>
                                 <button onClick={() => { setBrowserSpeedMap({}); setBrowserSpeedErrors({}); setPacketLossMap({}); setSelectedSpeedTargets(new Set()); }} disabled={isBrowserSpeedTesting || (Object.keys(browserSpeedMap).length === 0 && Object.keys(browserSpeedErrors).length === 0 && Object.keys(packetLossMap).length === 0)} className="px-3 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-600 dark:text-gray-200 dark:hover:bg-gray-500">清除测速结果</button>
                                 <div className="flex items-center gap-2">
@@ -563,7 +589,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                             <tr>
                                 <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
                                     <div className="flex items-center gap-2">
-                                        <input type="checkbox" checked={allVisibleSpeedSelected} onChange={toggleAllVisibleSpeedTargets} disabled={isBrowserSpeedTesting} title="全选可测速 IP" className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                                        <input type="checkbox" checked={allVisibleSpeedSelected} onChange={toggleAllVisibleSpeedTargets} disabled={isBrowserSpeedTesting || isCheckingPurity || isSaving} title="全选可用于测速、纯净度检测和 KV 保存的 IPv4" className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
                                         <span>IP/域名</span>
                                     </div>
                                 </th>
@@ -584,7 +610,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                                         <tr key={`${ip}:${port}`} className="hover:bg-gray-100 dark:hover:bg-gray-700">
                                             <td className="px-3 py-4 whitespace-nowrap text-sm font-mono text-gray-900 dark:text-white">
                                                 <div className="flex items-center gap-2">
-                                                    <input type="checkbox" checked={selectedSpeedTargets.has(`${ip}:${port}`)} onChange={() => toggleSpeedTarget(`${ip}:${port}`)} disabled={domain || isBrowserSpeedTesting} title="选择此 IP 进行浏览器下载测速" className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                                                    <input type="checkbox" checked={selectedSpeedTargets.has(`${ip}:${port}`)} onChange={() => toggleSpeedTarget(`${ip}:${port}`)} disabled={domain || isBrowserSpeedTesting || isCheckingPurity || isSaving} title="选择此 IP 用于下载测速、纯净度检测及保存到 KV" className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
                                                     <span>{ip}</span>
                                                 {domain && <span className="ml-2 px-1.5 py-0.5 text-[10px] rounded bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">域名</span>}
                                                 </div>
@@ -654,6 +680,10 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                         <span className="px-2.5 py-0.5 bg-indigo-100 text-indigo-800 text-sm font-semibold rounded-full dark:bg-indigo-900 dark:text-indigo-300">域名 {limitedResults.filter(r => r.domain).length} 个</span>
                     </div>
                     <div className="flex flex-wrap items-center gap-4">
+                        <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300 cursor-pointer select-none">
+                            <input type="checkbox" checked={saveSelectedOnly} onChange={(e) => setSaveSelectedOnly(e.target.checked)} className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                            仅保存勾选 IPv4 到 KV（取消则保存全部筛选结果）
+                        </label>
                         <div className="relative" ref={sceneInputRef}>
                             <input
                                 id="scene-name"
@@ -718,7 +748,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
 
                         <button
                             onClick={handleSave}
-                            disabled={isSaving || filteredResults.length === 0 || !sceneName.trim()}
+                            disabled={isSaving || (saveSelectedOnly ? selectedVisibleSpeedKeys.length === 0 : filteredResults.length === 0) || !sceneName.trim()}
                             className="flex items-center bg-blue-600 text-white font-bold py-2 px-6 rounded-md hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
                         >
                             <Save className="w-4 h-4 mr-2" />
