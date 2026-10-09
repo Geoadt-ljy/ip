@@ -253,6 +253,56 @@ export async function testBrowserDownloadSpeed(
     }
 }
 
+
+/**
+ * 浏览器端近似丢包率测试：连续发送多次 HTTPS 探测请求，按请求失败/超时比例计算。
+ * 注意这不是 ICMP ping；浏览器权限限制下，结果代表 HTTPS 探测请求失败率。
+ */
+export async function testBrowserPacketLoss(
+    ip: string,
+    port: number,
+    options: { attempts?: number; timeoutMs?: number; urlTemplate?: string } = {},
+): Promise<{ packetLoss: number; sent: number; received: number; error?: string }> {
+    if (isIPv6(ip) || isDomainName(ip)) {
+        return { packetLoss: 100, sent: 0, received: 0, error: '浏览器丢包测试目前仅支持 IPv4 IP' };
+    }
+    const hexIp = ipToHex(ip);
+    if (!hexIp) return { packetLoss: 100, sent: 0, received: 0, error: 'IPv4 地址格式无效' };
+    const httpsPorts = new Set([443, 2053, 2083, 2087, 2096, 8443]);
+    if (!httpsPorts.has(port)) {
+        return { packetLoss: 100, sent: 0, received: 0, error: `端口 ${port} 不属于支持的 HTTPS 端口` };
+    }
+
+    const attempts = Math.max(5, Math.min(20, Math.floor(options.attempts ?? 10)));
+    const timeoutMs = Math.max(1500, Math.min(8000, options.timeoutMs ?? 3000));
+    const template = (options.urlTemplate || 'https://{hexip}.ns.psb.kdns.fr:{port}/ip.json').trim();
+    const urlBase = template.replaceAll('{ip}', ip).replaceAll('{hexip}', hexIp).replaceAll('{port}', String(port));
+    let parsedUrl: URL;
+    try { parsedUrl = new URL(urlBase); } catch {
+        return { packetLoss: 100, sent: 0, received: 0, error: '探测地址无效；请使用 HTTPS URL' };
+    }
+    if (parsedUrl.protocol !== 'https:') {
+        return { packetLoss: 100, sent: 0, received: 0, error: '浏览器丢包检测地址必须使用 HTTPS' };
+    }
+    let received = 0;
+    for (let i = 0; i < attempts; i++) {
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            const response = await fetch(`${urlBase}?packet_probe=${Date.now()}_${i}_${Math.random().toString(36).slice(2)}`, {
+                method: 'GET', mode: 'no-cors', cache: 'no-store', credentials: 'omit', signal: controller.signal,
+            });
+            // no-cors 响应会是 opaque；fetch 能完成即计为一次 HTTPS 探测成功。
+            if (response.type === 'opaque' || response.ok) received++;
+        } catch {
+            // DNS、TLS、连接失败或超时，均计为探测丢失。
+        } finally {
+            window.clearTimeout(timer);
+        }
+    }
+    return { packetLoss: Number((((attempts - received) / attempts) * 100).toFixed(1)), sent: attempts, received };
+}
+
 export async function probeBrowserAvailable(sampleIps?: string[], attempts = 10): Promise<boolean> {
     const tasks = Array.from({ length: attempts }, async (_, i) => {
         const ip = sampleIps?.[i] ?? PROBE_FALLBACK_IPS[Math.floor(Math.random() * PROBE_FALLBACK_IPS.length)];
@@ -416,17 +466,17 @@ export class BatchScanner {
 function generateRandomIPFromCIDR(cidr: string): string {
     const [baseIP, prefixLength] = cidr.split('/');
     const prefix = parseInt(prefixLength, 10);
-    
+
     if (prefix === 32) return baseIP;
 
     const hostBits = 32 - prefix;
     const ipParts = baseIP.split('.').map(p => parseInt(p, 10));
-    
+
     const ipInt = (ipParts[0] << 24) | (ipParts[1] << 16) | (ipParts[2] << 8) | ipParts[3];
     const randomOffset = Math.floor(Math.random() * (2 ** hostBits));
     const mask = (0xFFFFFFFF << hostBits) >>> 0;
     const randomIPInt = ((ipInt & mask) >>> 0) + randomOffset;
-    
+
     return [
         (randomIPInt >>> 24) & 0xFF,
         (randomIPInt >>> 16) & 0xFF,
@@ -443,7 +493,7 @@ export function generateRandomIps(cidrs: string[], count: number): string[] {
         return [];
     }
     const randomIps = new Set<string>();
-    const maxAttempts = count * 5; 
+    const maxAttempts = count * 5;
     let attempts = 0;
 
     while (randomIps.size < count && attempts < maxAttempts) {

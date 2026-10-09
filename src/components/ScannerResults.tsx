@@ -4,6 +4,7 @@ import {
   ScanResult,
   getLatencyColor,
   testBrowserDownloadSpeed,
+  testBrowserPacketLoss,
 } from '../utils/scanner';
 import { useToast } from './Toast';
 import { ListFilter, Save, ChevronDown, ChevronUp } from 'lucide-react';
@@ -45,6 +46,11 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
     const [browserSpeedErrors, setBrowserSpeedErrors] = useState<Record<string, string>>({});
     const [isBrowserSpeedTesting, setIsBrowserSpeedTesting] = useState(false);
     const [browserSpeedDone, setBrowserSpeedDone] = useState(0);
+    const [packetLossMap, setPacketLossMap] = useState<Record<string, { packetLoss: number; sent: number; received: number; error?: string }>>({});
+    const [isPacketLossTesting, setIsPacketLossTesting] = useState(false);
+    const [packetLossDone, setPacketLossDone] = useState(0);
+    const [packetLossUrlTemplate, setPacketLossUrlTemplate] = useState('https://{hexip}.ns.psb.kdns.fr:{port}/ip.json');
+    const lastAutoSelectedResults = useRef<string>('');
     const filterInitialized = useRef(false);
 
     const uniqueRegions: string[] = Array.from(new Set(scanResults.map(r => r.colo))).filter((r): r is string => !!r).sort();
@@ -71,6 +77,15 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
         };
         load();
     }, []);
+
+    // 延迟扫描结果就绪后自动勾选全部 IPv4；只选择，不自动发起丢包探测。
+    useEffect(() => {
+        if (scanResults.length === 0) return;
+        const resultSignature = scanResults.map(r => `${r.ip}:${r.port}:${r.latency}`).join('|');
+        if (resultSignature === lastAutoSelectedResults.current) return;
+        lastAutoSelectedResults.current = resultSignature;
+        setSelectedSpeedTargets(new Set(scanResults.filter(r => !r.domain && /^\d{1,3}(\.\d{1,3}){3}$/.test(r.ip)).map(speedKey)));
+    }, [scanResults]);
 
     // 点击下拉外部时关闭场景选择浮层
     useEffect(() => {
@@ -218,6 +233,35 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
         }
     };
 
+    const handlePacketLossTest = async () => {
+        const targets = filteredResults.filter(r => !r.domain && selectedSpeedTargets.has(speedKey(r)));
+        if (targets.length === 0) {
+            showToast('请先勾选一个或多个 IPv4 IP', 'warning');
+            return;
+        }
+        setIsPacketLossTesting(true);
+        setPacketLossDone(0);
+        try {
+            const queue = [...targets];
+            let done = 0;
+            const worker = async () => {
+                while (queue.length) {
+                    const target = queue.shift();
+                    if (!target) return;
+                    const key = speedKey(target);
+                    const result = await testBrowserPacketLoss(target.ip, target.port, { attempts: 10, timeoutMs: 3000, urlTemplate: packetLossUrlTemplate });
+                    setPacketLossMap(prev => ({ ...prev, [key]: result }));
+                    done++;
+                    setPacketLossDone(done);
+                }
+            };
+            await Promise.all(Array.from({ length: Math.min(3, targets.length) }, () => worker()));
+            showToast(`HTTPS 探测丢包测试完成：${done} 个 IP`, 'success');
+        } finally {
+            setIsPacketLossTesting(false);
+        }
+    };
+
     const handlePurity = async () => {
         const ips = Array.from(new Set(scanResults.filter(r => !r.domain).map(r => r.ip)));
         if (ips.length === 0) {
@@ -268,7 +312,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
     };
 
     return (
-        
+
         <div className="bg-white dark:bg-gray-800 shadow-md rounded-lg p-6 mb-8">
             <div className="flex items-center gap-3 mb-4">
                 <ListFilter className="w-7 h-7 text-purple-500" />
@@ -282,7 +326,8 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                                 <h3 className="text-sm font-bold text-gray-700 dark:text-gray-200">筛选与操作:</h3>
                                 <button onClick={() => void handlePurity()} disabled={isCheckingPurity} className="px-3 py-1 text-xs font-medium rounded-full bg-emerald-100 text-emerald-700 hover:bg-emerald-200 disabled:opacity-50 dark:bg-emerald-900/40 dark:text-emerald-300">{isCheckingPurity ? '检测中...' : '检测纯净度'}</button>
                                 <button onClick={() => void handleBrowserSpeedTest()} disabled={isBrowserSpeedTesting || selectedVisibleSpeedKeys.length === 0} className="px-3 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-700 hover:bg-blue-200 disabled:opacity-50 dark:bg-blue-900/40 dark:text-blue-300">{isBrowserSpeedTesting ? `测速中 ${browserSpeedDone}/${selectedVisibleSpeedKeys.length}` : `浏览器测速 (${selectedVisibleSpeedKeys.length})`}</button>
-                                <button onClick={() => { setBrowserSpeedMap({}); setBrowserSpeedErrors({}); setSelectedSpeedTargets(new Set()); }} disabled={isBrowserSpeedTesting || (Object.keys(browserSpeedMap).length === 0 && Object.keys(browserSpeedErrors).length === 0)} className="px-3 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-600 dark:text-gray-200 dark:hover:bg-gray-500">清除测速结果</button>
+                                <button onClick={() => void handlePacketLossTest()} disabled={isPacketLossTesting || selectedVisibleSpeedKeys.length === 0} title="每个 IP 发送 10 次 HTTPS 探测；这不是 ICMP ping" className="px-3 py-1 text-xs font-medium rounded-full bg-amber-100 text-amber-800 hover:bg-amber-200 disabled:opacity-50 dark:bg-amber-900/40 dark:text-amber-300">{isPacketLossTesting ? `丢包测试 ${packetLossDone}/${selectedVisibleSpeedKeys.length}` : `丢包率测试 (${selectedVisibleSpeedKeys.length})`}</button>
+                                <button onClick={() => { setBrowserSpeedMap({}); setBrowserSpeedErrors({}); setPacketLossMap({}); setSelectedSpeedTargets(new Set()); }} disabled={isBrowserSpeedTesting || (Object.keys(browserSpeedMap).length === 0 && Object.keys(browserSpeedErrors).length === 0 && Object.keys(packetLossMap).length === 0)} className="px-3 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-600 dark:text-gray-200 dark:hover:bg-gray-500">清除测速结果</button>
                                 <div className="flex items-center gap-2">
                                     <input
                                         id="latency-filter-enable"
@@ -299,7 +344,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                                         className="h-4 w-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
                                     />
                                     <label htmlFor="latency-filter-enable" className="text-sm text-gray-600 dark:text-gray-300 cursor-pointer select-none">延迟 ≤</label>
-                                </div>                                
+                                </div>
                                  <div className="flex items-center gap-2">
                                     <input
                                         id="latency-filter-value"
@@ -410,13 +455,13 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                         <div className="flex items-center justify-between mb-2">
                             <h3 className="text-sm font-bold text-gray-700 dark:text-gray-200">按地区筛选</h3>
                             <div className="flex items-center gap-3">
-                                <button 
+                                <button
                                     onClick={() => setSelectedRegions(new Set(uniqueRegions))}
                                     className="px-3 py-1 text-xs font-medium text-blue-800 bg-blue-100 rounded-full hover:bg-blue-200 dark:bg-blue-900 dark:text-blue-300 dark:hover:bg-blue-800 transition-colors"
                                 >
                                     全选
                                 </button>
-                                <button 
+                                <button
                                     onClick={() => setSelectedRegions(new Set())}
                                     className="px-3 py-1 text-xs font-medium text-gray-800 bg-gray-100 rounded-full hover:bg-gray-200 dark:bg-gray-600 dark:text-gray-300 dark:hover:bg-gray-500 transition-colors"
                                 >
@@ -500,6 +545,18 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                             })}
                         </div>
                     </div>
+                    <div className="mb-3 rounded-lg border border-gray-200 dark:border-gray-600 p-3 space-y-2">
+                        <div className="text-sm text-gray-700 dark:text-gray-200">
+                            <span className="font-medium">延迟扫描完成后自动勾选 IPv4</span>
+                            <span className="ml-2 text-xs text-gray-500 dark:text-gray-400">仅自动选择，不会自动发起丢包测试；IP 数量不限</span>
+                        </div>
+                        <label className="block text-xs text-gray-600 dark:text-gray-300" htmlFor="packet-loss-url-template">自选探测地址模板（必须 HTTPS；支持 {'{ip}'}、{'{hexip}'}、{'{port}'}）</label>
+                        <div className="flex flex-col sm:flex-row gap-2">
+                            <input id="packet-loss-url-template" value={packetLossUrlTemplate} onChange={(e) => setPacketLossUrlTemplate(e.target.value)} disabled={isPacketLossTesting} placeholder="https://{hexip}.ns.psb.kdns.fr:{port}/ip.json" className="min-w-0 flex-1 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-xs text-gray-800 dark:text-gray-100" />
+                            <button onClick={() => setPacketLossMap({})} disabled={isPacketLossTesting} className="rounded-md bg-gray-100 dark:bg-gray-600 px-3 py-2 text-xs text-gray-700 dark:text-gray-100 disabled:opacity-50">清除丢包结果</button>
+                        </div>
+                    </div>
+                    <p className="mb-2 text-xs text-gray-500 dark:text-gray-400">* 丢包率是 HTTPS 探测失败比例，不是 ICMP Ping。EDT 项目没有通用丢包测试专用地址，因此默认沿用本项目按候选 IP 生成的 HTTPS 探测模板；自定义地址需支持对应的 IP/端口访问。DNS、TLS、CORS 或目标服务限制都可能影响结果。</p>
                     <div className="max-h-96 overflow-y-auto">
                     <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                         <thead className="bg-gray-50 dark:bg-gray-700 sticky top-0">
@@ -514,6 +571,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">延迟 (ms)</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">地区</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">下载速度</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">丢包率*</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">纯净度</th>
                             </tr>
                         </thead>
@@ -535,6 +593,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                                             <td className={`px-6 py-4 whitespace-nowrap text-sm font-bold ${getLatencyColor(latency)}`}>{latency > -1 ? `${latency}ms` : 'N/A'}</td>
                                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{colo ? <RegionDisplay colo={colo} flagSize="sm" /> : '-'}</td>
                                             <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-blue-600 dark:text-blue-400">{displayDownloadMbps({ ip, port, latency, colo, domain, downloadMbps, isAvailable: true }) > 0 ? `${displayDownloadMbps({ ip, port, latency, colo, domain, downloadMbps, isAvailable: true }).toFixed(2)} Mbps` : (browserSpeedErrors[`${ip}:${port}`] ? '失败' : '-')}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold">{packetLossMap[`${ip}:${port}`] ? (packetLossMap[`${ip}:${port}`].error ? <span className="text-red-500" title={packetLossMap[`${ip}:${port}`].error}>不可测</span> : <span className={packetLossMap[`${ip}:${port}`].packetLoss === 0 ? 'text-green-600 dark:text-green-400' : packetLossMap[`${ip}:${port}`].packetLoss < 20 ? 'text-amber-600 dark:text-amber-400' : 'text-red-600 dark:text-red-400'}>{packetLossMap[`${ip}:${port}`].packetLoss}% <span className="font-normal text-xs text-gray-500">({packetLossMap[`${ip}:${port}`].received}/{packetLossMap[`${ip}:${port}`].sent})</span></span>) : '-'}</td>
                                             <td className="px-6 py-4 whitespace-nowrap text-sm">
                                                 <div className="flex items-center gap-2">
                                                     {purity ? <span className={purity.purityScore >= 90 ? 'text-green-600 dark:text-green-400' : purity.purityScore >= 70 ? 'text-yellow-600 dark:text-yellow-400' : 'text-red-600 dark:text-red-400'}>{purity.purityScore} / 100</span> : '-'}
@@ -548,7 +607,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                                         </tr>
                                         {expanded && purity && (
                                             <tr key={`${ip}:${port}:purity`} className="bg-gray-50 dark:bg-gray-900 text-gray-800 dark:text-gray-100">
-                                                <td colSpan={6} className="px-6 pb-5 pt-2">
+                                                <td colSpan={7} className="px-6 pb-5 pt-2">
                                                     <div className="rounded-lg border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-100 p-4">
                                                         <div className="flex flex-wrap items-center gap-2 mb-4">
                                                             <span className="text-sm font-semibold text-gray-700 dark:text-gray-200">纯净度详情</span>
@@ -587,7 +646,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                         </tbody>
                     </table>
                 </div>
-           
+
                 <div className="mt-6 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600">
                     <div className="flex items-center gap-3 mb-4">
                         <h3 className="text-lg font-semibold text-gray-700 dark:text-gray-200">保存结果</h3>
@@ -596,9 +655,9 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                     </div>
                     <div className="flex flex-wrap items-center gap-4">
                         <div className="relative" ref={sceneInputRef}>
-                            <input 
+                            <input
                                 id="scene-name"
-                                type="text" 
+                                type="text"
                                 value={sceneName}
                                 onChange={(e) => {
                                     const v = e.target.value;
@@ -633,7 +692,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                                 </div>
                             )}
                         </div>
-                        
+
                         <div className="relative flex w-fit items-center rounded-lg bg-gray-100 p-1 dark:bg-gray-700 border border-gray-200 dark:border-gray-600">
                             <button
                                 onClick={() => setSaveMode('overwrite')}

@@ -30,6 +30,7 @@
 - **联合筛选**：支持同时设置「下载速度 ≥」和「纯净度 ≥」，只保留同时满足条件的 IP。
 - **纯净度详情**：点击结果中的纯净度分数旁边的展开按钮，可以查看 Fraud Score、风险、VPN、Proxy、Tor、Relay、数据中心、移动网络、滥用、住宅代理、连接类型、国家/地区/城市、ASN、ISP、组织、置信度、威胁标签和风险原因等信息。
 - **浏览器测速提示**：浏览器支持直接对单个或多个 IPv4 IP 进行下载测速；仅支持 HTTPS 端口，本地 Agent 测速作为备用方式。
+- **丢包率测试**：延迟扫描结果就绪后自动勾选全部 IPv4 地址，但不会自动发起测试；用户点击丢包率测试按钮后才开始。没有 IP 数量上限，可自定义 HTTPS 探测地址模板，支持 `{ip}`、`{hexip}`、`{port}` 占位符。浏览器无法发送原始 ICMP ping，因此结果是 HTTPS 探测失败率，并非 ICMP ping 丢包率。
 
 ## 简介 (Introduction)
 一个帮你自建 Cloudflare 优选 IP/域名 库的小工具，
@@ -49,7 +50,7 @@
 
 ### 步骤 2: 在 Cloudflare 创建所需服务
 
-在部署之前，我们需要在 Cloudflare 上创建一个用于存储数据的 KV 存储空间。 
+在部署之前，我们需要在 Cloudflare 上创建一个用于存储数据的 KV 存储空间。
 
 -   登录 Cloudflare Dashboard。
 -   在右侧菜单中选择 `Workers & Pages` -> `KV`。
@@ -60,15 +61,15 @@
 -   选择你刚刚 Fork 的仓库，点击 `Begin setup`（开始设置）。
 -   **配置构建设置 (非常重要):**
     -   **Project name (项目名称)**: 随便起个你喜欢的名字。
-    -   **Production branch (生产分支)**: 保持 `main` 或 `master` 不变。 
+    -   **Production branch (生产分支)**: 保持 `main` 或 `master` 不变。
     -   **Framework preset(框架预设)**: 选择 `无`。
-    -   **Build command(构建命令)**: 确保这里是 `npm run build`。 
-    -   **Build output directory(构建输出目录)** : 确保是 `dist`。 
+    -   **Build command(构建命令)**: 确保这里是 `npm run build`。
+    -   **Build output directory(构建输出目录)** : 确保是 `dist`。
 -   点击 `Save and Deploy（保存并部署）`。Cloudflare 会开始第一次构建，这次构建**可能会失败或者不完整**，因为我们还没配置环境变量和 KV，别急，继续下一步。
 
 ### 步骤 4: 配置项目
 
-等待第一次部署结束后（无论成功失败），进入你新创建的 Pages 项目，点击 `Settings（设置）`。 
+等待第一次部署结束后（无论成功失败），进入你新创建的 Pages 项目，点击 `Settings（设置）`。
 
 #### a. 添加环境变量
 -   进入 `Settings（设置）` -> `Environment variables（变量和机密）`。
@@ -77,7 +78,7 @@
     -   `JWT_SECRET`: 随便一长串随机字符，用于会话安全。
     -   `APITOKEN`: 订阅链接用的，也随便一长串。
 
-#### b. 绑定 KV 存储 
+#### b. 绑定 KV 存储
 -   进入 `Settings` -> `Functions`。
 -   向下滚动到 `KV Namespace Bindings`，点击 `Add binding`。
     -   **Variable name** (变量名): **必须**填写 `IP_KV`。
