@@ -436,6 +436,31 @@ function measureDownloadSpeed(host, port, opt) {
 // ==================================================================
 // 并发池（支持中途停止）
 // ==================================================================
+
+// CFData-WEB 的自动测速候选源：Cloudflare 官方源、CM 提供源、移动专属源。
+// 每次仍然直连待测 IP，并将对应候选域名作为 TLS SNI / HTTP Host；失败后才切换。
+const CFDATA_DOWNLOAD_CANDIDATES = [
+  'https://speed.cloudflare.com/__down?bytes=200000000',
+  'https://cf.090227.xyz/__down?bytes=99999999',
+  'https://speed.okl.abrdns.com/',
+];
+
+async function measureDownloadSpeed(host, port, opt) {
+  const configured = String(opt.downloadUrl || '').trim();
+  const useCandidates = !configured ||
+    configured.toLowerCase() === 'auto' ||
+    configured === DEFAULTS.downloadUrl;
+  const urls = useCandidates ? CFDATA_DOWNLOAD_CANDIDATES : [configured];
+  let lastResult = { downloadMbps: 0, downloadBytes: 0, error: 'all download sources failed' };
+
+  for (const downloadUrl of urls) {
+    const result = await measureDownloadSpeedOnce(host, port, { ...opt, downloadUrl });
+    if (!result.error && result.downloadBytes > 0) return result;
+    lastResult = result;
+  }
+  return lastResult;
+}
+
 async function runPool(items, concurrency, worker, shouldStop) {
   let cursor = 0;
   const results = [];

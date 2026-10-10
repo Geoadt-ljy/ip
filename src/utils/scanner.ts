@@ -92,88 +92,108 @@ function isIPv6(ip: string): boolean {
     return ip.includes(':');
 }
 
-/**
- * 测试单个 IP 的延迟并获取其 Cloudflare colo
- *
- * 浏览器无法直接为任意 IP 设置自定义 TLS SNI，故采用「hex 域名技巧」：
- * 将 IPv4 编码进子域名 <hexIp>.ns.psb.kdns.fr，由 Cloudflare 边缘按
- * ip.json 端点返回 colo；IPv6 则直接连地址并指定 Host 头。
- * 该路径依赖浏览器对测速域名的 DNS 解析，解析不通即自然返回失败，
- * 从而引导用户改用更可靠的「本地 Agent 测速」。
- */
-async function testIpLatency(ip: string, port: number, timeout: number): Promise<Omit<ScanResult, 'isAvailable' | 'ip' | 'port'>> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+// 浏览器端候选探测域名。优先沿用 kgcfip 原域名，失败后尝试 EDT/BestCF 常见候选。
+const TEST_DOMAIN_CANDIDATES = [
+    'ns.psb.kdns.fr',
+    'bestcf.cmliussss.hidns.vip',
+] as const;
+const TEST_DOMAIN_CACHE_KEY = 'kgcfip_test_domain_v1';
+let memoryTestDomain: string | null = null;
 
-    const headers: Record<string, string> = { 'User-Agent': 'Cloudflare-IP-Scanner/1.0' };
-    let testUrl: string;
-    if (isIPv6(ip)) {
-        // IPv6 无法使用 hex 技巧，直接连接地址并指定 Host 头部，
-        // 由 Cloudflare 边缘按 ip.json 特殊端点返回 colo
-        headers['Host'] = 'ns.psb.kdns.fr';
-        testUrl = `https://[${ip}]:${port}/ip.json?_t=${Date.now()}`;
-    } else {
-        // IPv4 通过 IP 转换得到的十六进制拼接测速域名，返回的 JSON 中 "colo" 字段即为机场码
-        const hexIp = ipToHex(ip);
-        const testDomain = hexIp ? `${hexIp}.ns.psb.kdns.fr` : `${ip}.ns.psb.kdns.fr`;
-        testUrl = `https://${testDomain}:${port}/ip.json?_t=${Date.now()}`;
+function getCachedTestDomain(): string | null {
+    if (memoryTestDomain && TEST_DOMAIN_CANDIDATES.includes(memoryTestDomain as any)) {
+        return memoryTestDomain;
     }
-
     try {
-        // 第一次请求用于预热 DNS、TLS 等，并获取 colo
-        const response1 = await fetch(testUrl, {
-            signal: controller.signal,
-            headers,
-        });
-
-        if (!response1.ok) {
-            return { latency: -1, colo: `HTTP ${response1.status}` };
+        const cached = window.localStorage.getItem(TEST_DOMAIN_CACHE_KEY);
+        if (cached && TEST_DOMAIN_CANDIDATES.includes(cached as any)) {
+            memoryTestDomain = cached;
+            return cached;
         }
+    } catch {
+        // 隐私模式或浏览器禁用 localStorage 时使用内存缓存。
+    }
+    return null;
+}
 
-        let colo = '-';
-        try {
-            // 该测速地址的响应体包含 colo 信息 (例如 {"colo": "LAX", ...})
-            const data = await response1.json() as { colo?: string };
-            if (data?.colo) {
-                colo = data.colo;
-            }
-        } catch (e) {
-            // 如果响应不是 JSON，则忽略
-        }
-
-        // 第二次请求用于获取更准确的 RTT
-        const secondRequestStart = Date.now();
-        await fetch(testUrl, {
-            signal: controller.signal,
-            headers,
-        });
-        const latency = Date.now() - secondRequestStart;
-
-        return { latency, colo };
-
-    } catch (error: any) {
-        if (error.name === 'AbortError') {
-            return { latency: -1, colo: 'Timeout' };
-        }
-        return { latency: -1, colo: 'Error' };
-    } finally {
-        clearTimeout(timeoutId);
+function cacheTestDomain(domain: string): void {
+    memoryTestDomain = domain;
+    try {
+        window.localStorage.setItem(TEST_DOMAIN_CACHE_KEY, domain);
+    } catch {
+        // 内存缓存仍然有效。
     }
 }
 
+function clearCachedTestDomain(domain?: string): void {
+    if (!domain || memoryTestDomain === domain) memoryTestDomain = null;
+    try {
+        if (!domain || window.localStorage.getItem(TEST_DOMAIN_CACHE_KEY) === domain) {
+            window.localStorage.removeItem(TEST_DOMAIN_CACHE_KEY);
+        }
+    } catch {
+        // 忽略缓存清理错误。
+    }
+}
+
+function orderedTestDomains(): string[] {
+    const cached = getCachedTestDomain();
+    return cached
+        ? [cached, ...TEST_DOMAIN_CANDIDATES.filter(domain => domain !== cached)]
+        : [...TEST_DOMAIN_CANDIDATES];
+}
+
 /**
- * 浏览器端测速可用性自检：探测测速域名能否被解析。
- * 注意该域名是通配符解析，裸域 ns.psb.kdns.fr 本身可能无记录，
- * 因此按实际测速路径，用十六进制编码的样例 IP 子域名去探测
- * （与 testIpLatency 拼接的 <hexIp>.ns.psb.kdns.fr 完全一致）。
- *
- * 为避免单次 DNS 偶发失败造成误判，默认随机取样例 IP 并行探测 10 次，
- * 只要有一次解析成功即认为当前环境可进行网页测速；
- * 全部失败才判定当前浏览器环境不可用。
- *
- * @param sampleIps 页面同步到的 Cloudflare IP 段中随机生成的样例 IP 列表
- * @param attempts  探测次数，默认 10
+ * 浏览器无法自定义 Host/SNI 直连任意 IP。通过候选泛解析域名进行 HTTPS 探测，
+ * no-cors 模式避免测速域名未开放 CORS 时把成功连接误判为失败。
+ * 成功域名会缓存；缓存域名失效时会自动清除并切换候选。
  */
+async function testIpLatency(ip: string, port: number, timeout: number): Promise<Omit<ScanResult, 'isAvailable' | 'ip' | 'port'>> {
+    if (isIPv6(ip)) {
+        return { latency: -1, colo: '浏览器暂不支持 IPv6 直连探测，请使用本地 Agent' };
+    }
+
+    const hexIp = ipToHex(ip);
+    if (!hexIp) return { latency: -1, colo: 'Invalid IPv4' };
+
+    const timeoutMs = Math.max(1000, timeout);
+    const cached = getCachedTestDomain();
+    for (const domain of orderedTestDomains()) {
+        const host = `${hexIp}.${domain}`;
+        const url = `https://${host}:${port}/cdn-cgi/trace?_kgcfip=${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+        const started = performance.now();
+        try {
+            const response = await fetch(url, {
+                method: 'GET',
+                mode: 'no-cors',
+                cache: 'no-store',
+                credentials: 'omit',
+                redirect: 'follow',
+                signal: controller.signal,
+            });
+            // no-cors 返回 opaque 是预期行为：浏览器不暴露响应状态，但网络请求确实完成。
+            if (response.type === 'opaque' || response.ok) {
+                const latency = Math.max(1, Math.round(performance.now() - started));
+                cacheTestDomain(domain);
+                return { latency, colo: '-' };
+            }
+            clearCachedTestDomain(domain);
+        } catch (error: any) {
+            clearCachedTestDomain(domain);
+            if (error?.name === 'AbortError') {
+                // 当前域名超时，继续尝试候选池中的下一个域名。
+            }
+        } finally {
+            window.clearTimeout(timeoutId);
+        }
+        // 只有当前缓存域名失败时才清掉；继续尝试剩余候选。
+        if (cached === domain) clearCachedTestDomain(domain);
+    }
+    return { latency: -1, colo: '候选测速域名均不可用' };
+}
+
 const PROBE_FALLBACK_IPS = ['104.16.0.1', '172.67.0.1', '162.159.0.1', '162.158.0.1', '188.114.96.1', '108.162.192.1'];
 
 
@@ -211,46 +231,42 @@ export async function testBrowserDownloadSpeed(
 
     const bytes = Math.max(512 * 1024, Math.min(options.bytes ?? 10 * 1024 * 1024, 100 * 1024 * 1024));
     const timeoutMs = Math.max(3000, options.timeoutMs ?? 15000);
-    const host = `${hexIp}.ns.psb.kdns.fr`;
-    const url = `https://${host}:${port}/__down?bytes=${bytes}&_t=${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
-    const start = performance.now();
-
-    try {
-        // 关键：使用 no-cors。测速只需要“请求完成所花时间”，不需要读取跨域响应体。
-        // 如果使用普通 cors fetch，目标端点没有 ACAO 时会直接被浏览器拦截，
-        // 这就是上一版“全部失败”的主要原因。
-        const response = await fetch(url, {
-            method: 'GET',
-            mode: 'no-cors',
-            cache: 'no-store',
-            signal: controller.signal,
-            credentials: 'omit',
-        });
-
-        const elapsedMs = Math.max(1, performance.now() - start);
-        if (response.type !== 'opaque' && !response.ok) {
-            return { downloadMbps: 0, downloadBytes: 0, downloadMs: Math.round(elapsedMs), error: `HTTP ${response.status}` };
+    const candidateDomains = orderedTestDomains();
+    let lastError = '浏览器无法连接该 IP 的 HTTPS 测速端点';
+    for (const domain of candidateDomains) {
+        const host = `${hexIp}.${domain}`;
+        const url = `https://${host}:${port}/__down?bytes=${bytes}&_t=${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+        const start = performance.now();
+        try {
+            const response = await fetch(url, {
+                method: 'GET',
+                mode: 'no-cors',
+                cache: 'no-store',
+                signal: controller.signal,
+                credentials: 'omit',
+            });
+            const elapsedMs = Math.max(1, performance.now() - start);
+            if (response.type !== 'opaque' && !response.ok) {
+                lastError = `HTTP ${response.status}`;
+                clearCachedTestDomain(domain);
+                continue;
+            }
+            cacheTestDomain(domain);
+            // no-cors 无法读取 body，因此吞吐是按请求完成时间与目标字节数估算。
+            const mbps = (bytes * 8) / (elapsedMs / 1000) / 1_000_000;
+            return { downloadMbps: Number(mbps.toFixed(2)), downloadBytes: bytes, downloadMs: Math.round(elapsedMs) };
+        } catch (error: any) {
+            lastError = error?.name === 'AbortError'
+                ? `测速超时（>${Math.round(timeoutMs / 1000)}秒）`
+                : '浏览器无法连接该 IP 的 HTTPS 测速端点';
+            clearCachedTestDomain(domain);
+        } finally {
+            window.clearTimeout(timer);
         }
-
-        // __down?bytes=N 返回固定 N 字节；no-cors 无法读取 body，
-        // 所以使用请求参数中的已知字节数计算吞吐。
-        const mbps = (bytes * 8) / (elapsedMs / 1000) / 1_000_000;
-        return {
-            downloadMbps: Number(mbps.toFixed(2)),
-            downloadBytes: bytes,
-            downloadMs: Math.round(elapsedMs),
-        };
-    } catch (error: any) {
-        const elapsedMs = Math.max(1, performance.now() - start);
-        const message = error?.name === 'AbortError'
-            ? `测速超时（>${Math.round(timeoutMs / 1000)}秒）`
-            : '浏览器无法连接该 IP 的 HTTPS 测速端点';
-        return { downloadMbps: 0, downloadBytes: 0, downloadMs: Math.round(elapsedMs), error: message };
-    } finally {
-        window.clearTimeout(timer);
     }
+    return { downloadMbps: 0, downloadBytes: 0, downloadMs: 0, error: lastError };
 }
 
 
@@ -275,41 +291,81 @@ export async function testBrowserPacketLoss(
 
     const attempts = Math.max(5, Math.min(20, Math.floor(options.attempts ?? 10)));
     const timeoutMs = Math.max(1500, Math.min(8000, options.timeoutMs ?? 3000));
-    const template = (options.urlTemplate || 'https://{hexip}.ns.psb.kdns.fr:{port}/ip.json').trim();
-    const urlBase = template.replace(/\{ip\}/g, ip).replace(/\{hexip\}/g, hexIp).replace(/\{port\}/g, String(port));
-    let parsedUrl: URL;
-    try { parsedUrl = new URL(urlBase); } catch {
+    const customTemplate = options.urlTemplate?.trim();
+    const templates = customTemplate
+        ? [customTemplate]
+        : orderedTestDomains().map(domain => `https://{hexip}.${domain}:{port}/cdn-cgi/trace`);
+    const parsedTemplates: Array<{ template: string; domain?: string }> = [];
+    try {
+        for (const template of templates) {
+            const urlBase = template.replace(/\{ip\}/g, ip).replace(/\{hexip\}/g, hexIp).replace(/\{port\}/g, String(port));
+            const parsed = new URL(urlBase);
+            if (parsed.protocol !== 'https:') {
+                return { packetLoss: 100, sent: 0, received: 0, error: '浏览器丢包检测地址必须使用 HTTPS' };
+            }
+            const domain = TEST_DOMAIN_CANDIDATES.find(item => parsed.hostname === `${hexIp}.${item}`);
+            parsedTemplates.push({ template: urlBase, domain });
+        }
+    } catch {
         return { packetLoss: 100, sent: 0, received: 0, error: '探测地址无效；请使用 HTTPS URL' };
-    }
-    if (parsedUrl.protocol !== 'https:') {
-        return { packetLoss: 100, sent: 0, received: 0, error: '浏览器丢包检测地址必须使用 HTTPS' };
     }
     let received = 0;
     for (let i = 0; i < attempts; i++) {
-        const controller = new AbortController();
-        const timer = window.setTimeout(() => controller.abort(), timeoutMs);
-        try {
-            const response = await fetch(`${urlBase}?packet_probe=${Date.now()}_${i}_${Math.random().toString(36).slice(2)}`, {
-                method: 'GET', mode: 'no-cors', cache: 'no-store', credentials: 'omit', signal: controller.signal,
-            });
-            // no-cors 响应会是 opaque；fetch 能完成即计为一次 HTTPS 探测成功。
-            if (response.type === 'opaque' || response.ok) received++;
-        } catch {
-            // DNS、TLS、连接失败或超时，均计为探测丢失。
-        } finally {
-            window.clearTimeout(timer);
+        let attemptSucceeded = false;
+        for (const candidate of parsedTemplates) {
+            const controller = new AbortController();
+            const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+            try {
+                const response = await fetch(`${candidate.template}${candidate.template.includes('?') ? '&' : '?'}packet_probe=${Date.now()}_${i}_${Math.random().toString(36).slice(2)}`, {
+                    method: 'GET', mode: 'no-cors', cache: 'no-store', credentials: 'omit', signal: controller.signal,
+                });
+                if (response.type === 'opaque' || response.ok) {
+                    attemptSucceeded = true;
+                    if (candidate.domain) cacheTestDomain(candidate.domain);
+                    break;
+                }
+            } catch {
+                // 当前候选失败时尝试下一个域名。
+            } finally {
+                window.clearTimeout(timer);
+            }
         }
+        if (attemptSucceeded) received++;
     }
     return { packetLoss: Number((((attempts - received) / attempts) * 100).toFixed(1)), sent: attempts, received };
 }
 
 export async function probeBrowserAvailable(sampleIps?: string[], attempts = 10): Promise<boolean> {
-    const tasks = Array.from({ length: attempts }, async (_, i) => {
-        const ip = sampleIps?.[i] ?? PROBE_FALLBACK_IPS[Math.floor(Math.random() * PROBE_FALLBACK_IPS.length)];
-        const probeHex = ipToHex(ip);
-        if (!probeHex) return false;
-        const resolved = await resolveDomainToIp(`${probeHex}.ns.psb.kdns.fr`);
-        return !!resolved;
+    const ips = Array.from({ length: Math.max(1, attempts) }, (_, i) =>
+        sampleIps?.[i] ?? PROBE_FALLBACK_IPS[Math.floor(Math.random() * PROBE_FALLBACK_IPS.length)]
+    );
+    const domains = orderedTestDomains();
+    const tasks = ips.map(async (ip) => {
+        const hexIp = ipToHex(ip);
+        if (!hexIp) return false;
+        for (const domain of domains) {
+            const controller = new AbortController();
+            const timer = window.setTimeout(() => controller.abort(), 2500);
+            try {
+                const url = `https://${hexIp}.${domain}:443/cdn-cgi/trace?_probe=${Date.now()}_${Math.random().toString(36).slice(2)}`;
+                const response = await fetch(url, {
+                    method: 'GET',
+                    mode: 'no-cors',
+                    cache: 'no-store',
+                    credentials: 'omit',
+                    signal: controller.signal,
+                });
+                if (response.type === 'opaque' || response.ok) {
+                    cacheTestDomain(domain);
+                    return true;
+                }
+            } catch {
+                // 当前候选失败时继续检查下一个。
+            } finally {
+                window.clearTimeout(timer);
+            }
+        }
+        return false;
     });
     const results = await Promise.all(tasks);
     return results.some(Boolean);
