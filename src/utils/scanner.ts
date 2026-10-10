@@ -101,63 +101,95 @@ function isIPv6(ip: string): boolean {
  * 该路径依赖浏览器对测速域名的 DNS 解析，解析不通即自然返回失败，
  * 从而引导用户改用更可靠的「本地 Agent 测速」。
  */
-async function testIpLatency(ip: string, port: number, timeout: number): Promise<Omit<ScanResult, 'isAvailable' | 'ip' | 'port'>> {
+async function testIpLatency(
+    ip: string,
+    port: number,
+    timeout: number
+): Promise<Omit<ScanResult, 'isAvailable' | 'ip' | 'port'>> {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-    const headers: Record<string, string> = { 'User-Agent': 'Cloudflare-IP-Scanner/1.0' };
-    let testUrl: string;
-    if (isIPv6(ip)) {
-        // IPv6 无法使用 hex 技巧，直接连接地址并指定 Host 头部，
-        // 由 Cloudflare 边缘按 ip.json 特殊端点返回 colo
-        headers['Host'] = 'ns.psb.kdns.fr';
-        testUrl = `https://[${ip}]:${port}/ip.json?_t=${Date.now()}`;
-    } else {
-        // IPv4 通过 IP 转换得到的十六进制拼接测速域名，返回的 JSON 中 "colo" 字段即为机场码
-        const hexIp = ipToHex(ip);
-        const testDomain = hexIp ? `${hexIp}.ns.psb.kdns.fr` : `${ip}.ns.psb.kdns.fr`;
-        testUrl = `https://${testDomain}:${port}/ip.json?_t=${Date.now()}`;
-    }
+    const timeoutId = window.setTimeout(
+        () => controller.abort(),
+        timeout
+    );
 
     try {
-        // 第一次请求用于预热 DNS、TLS 等，并获取 colo
-        const response1 = await fetch(testUrl, {
+        let testUrl: string;
+
+        if (isIPv6(ip)) {
+            // 浏览器不能手动设置 Host 请求头。
+            // IPv6 直连可能因 TLS 证书或 SNI 不匹配而失败。
+            testUrl = `https://[${ip}]:${port}/ip.json?_t=${Date.now()}`;
+        } else {
+            const hexIp = ipToHex(ip);
+
+            if (!hexIp) {
+                return { latency: -1, colo: 'InvalidIP' };
+            }
+
+            testUrl =
+                `https://${hexIp}.ns.psb.kdns.fr:${port}/ip.json?_t=${Date.now()}`;
+        }
+
+        // 不设置 User-Agent 或 Host。
+        // 这些请求头由浏览器管理，网页脚本不能自行覆盖。
+        const request = () => fetch(testUrl, {
+            method: 'GET',
+            mode: 'cors',
+            cache: 'no-store',
+            credentials: 'omit',
             signal: controller.signal,
-            headers,
         });
 
-        if (!response1.ok) {
-            return { latency: -1, colo: `HTTP ${response1.status}` };
+        // 第一次请求：验证 HTTP 响应并尝试读取 colo。
+        const first = await request();
+
+        if (!first.ok) {
+            return {
+                latency: -1,
+                colo: `HTTP ${first.status}`,
+            };
         }
 
         let colo = '-';
+
         try {
-            // 该测速地址的响应体包含 colo 信息 (例如 {"colo": "LAX", ...})
-            const data = await response1.json() as { colo?: string };
-            if (data?.colo) {
+            const data = await first.json() as { colo?: string };
+
+            if (typeof data?.colo === 'string' && data.colo.length > 0) {
                 colo = data.colo;
             }
-        } catch (e) {
-            // 如果响应不是 JSON，则忽略
+        } catch {
+            // JSON 解析失败不直接认定连接失败；
+            // 继续进行第二次 HTTP 探测。
         }
 
-        // 第二次请求用于获取更准确的 RTT
-        const secondRequestStart = Date.now();
-        await fetch(testUrl, {
-            signal: controller.signal,
-            headers,
-        });
-        const latency = Date.now() - secondRequestStart;
+        // 第二次请求：测量请求耗时，并验证响应状态。
+        const secondStartedAt = performance.now();
+        const second = await request();
+        const latency = Math.max(
+            1,
+            Math.round(performance.now() - secondStartedAt)
+        );
+
+        if (!second.ok) {
+            return {
+                latency: -1,
+                colo: `HTTP ${second.status}`,
+            };
+        }
 
         return { latency, colo };
+    } catch (error: unknown) {
+        const e = error as Error;
 
-    } catch (error: any) {
-        if (error.name === 'AbortError') {
-            return { latency: -1, colo: 'Timeout' };
-        }
-        return { latency: -1, colo: 'Error' };
+        return {
+            latency: -1,
+            colo: e?.name === 'AbortError'
+                ? 'Timeout'
+                : 'NetworkOrCORS',
+        };
     } finally {
-        clearTimeout(timeoutId);
+        window.clearTimeout(timeoutId);
     }
 }
 
