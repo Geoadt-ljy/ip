@@ -48,6 +48,15 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
     const [browserSpeedErrors, setBrowserSpeedErrors] = useState<Record<string, string>>({});
     const [isBrowserSpeedTesting, setIsBrowserSpeedTesting] = useState(false);
     const [browserSpeedDone, setBrowserSpeedDone] = useState(0);
+    const [browserSpeedTotal, setBrowserSpeedTotal] = useState(0);
+    const [speedPending, setSpeedPending] = useState<Record<string, true>>({});
+    const [purityDone, setPurityDone] = useState(0);
+    const [purityTotal, setPurityTotal] = useState(0);
+    const [purityPending, setPurityPending] = useState<Record<string, true>>({});
+    const [purityFailed, setPurityFailed] = useState<Record<string, true>>({});
+    // 用于“强行中断”：持有当前运行中的测速 / 纯净度检测的 AbortController
+    const speedAbortRef = useRef<AbortController | null>(null);
+    const purityAbortRef = useRef<AbortController | null>(null);
     const [packetLossMap, setPacketLossMap] = useState<Record<string, { packetLoss: number; sent: number; received: number; error?: string }>>({});
     const [isPacketLossTesting, setIsPacketLossTesting] = useState(false);
     const [packetLossDone, setPacketLossDone] = useState(0);
@@ -85,12 +94,24 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
     // 延迟扫描结束后不自动选择任何 IP；用户在结果列表中手动勾选后再运行下载测速、
     // 纯净度检测、丢包率检测或保存到 KV，避免延迟扫描阶段并行启动下载测速。
     useEffect(() => {
+        // 结果集变化时，先中断仍在运行的测速 / 纯净度检测，避免旧任务写入新结果
+        speedAbortRef.current?.abort();
+        purityAbortRef.current?.abort();
         setSelectedSpeedTargets(new Set());
         setBrowserSpeedMap({});
         setBrowserSpeedErrors({});
         setPacketLossMap({});
         setPurityMap({});
+        setPurityFailed({});
+        setPurityPending({});
+        setSpeedPending({});
     }, [scanResults]);
+
+    // 组件卸载时中断所有进行中的请求
+    useEffect(() => () => {
+        speedAbortRef.current?.abort();
+        purityAbortRef.current?.abort();
+    }, []);
 
     // 点击下拉外部时关闭场景选择浮层
     useEffect(() => {
@@ -220,15 +241,20 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
             showToast('请先勾选一个或多个 IPv4 IP', 'warning');
             return;
         }
+        const controller = new AbortController();
+        speedAbortRef.current = controller;
+        const signal = controller.signal;
         setIsBrowserSpeedTesting(true);
         setBrowserSpeedDone(0);
+        setBrowserSpeedTotal(targets.length);
         setBrowserSpeedErrors({});
+        setSpeedPending(Object.fromEntries(targets.map(t => [speedKey(t), true as const])));
+        let done = 0;
         try {
             // 控制并发，避免同时建立过多连接；支持单个或多个 IP。
             const queue = [...targets];
-            let done = 0;
             const worker = async () => {
-                while (queue.length) {
+                while (queue.length && !signal.aborted) {
                     const target = queue.shift();
                     if (!target) return;
                     const key = speedKey(target);
@@ -240,22 +266,39 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                     const result = await testBrowserDownloadSpeed(target.ip, target.port, {
                         bytes: 25 * 1024 * 1024,
                         timeoutMs: 30000,
+                        signal,
                         ...(selectedTemplate ? { urlTemplate: selectedTemplate } : {}),
                     });
+                    // 被用户中断的目标不记为失败，保持“未测”状态
+                    if (result.aborted) return;
                     if (result.downloadMbps > 0) {
                         setBrowserSpeedMap(prev => ({ ...prev, [key]: result.downloadMbps }));
                     } else {
                         setBrowserSpeedErrors(prev => ({ ...prev, [key]: result.error || '测速失败' }));
                     }
+                    setSpeedPending(prev => { const next = { ...prev }; delete next[key]; return next; });
                     done++;
                     setBrowserSpeedDone(done);
                 }
             };
             await Promise.all(Array.from({ length: Math.min(3, targets.length) }, () => worker()));
-            showToast(`浏览器下载测速完成：${done} 个 IP`, 'success');
+            if (signal.aborted) {
+                showToast(`已中断下载测速：完成 ${done}/${targets.length} 个 IP`, 'warning');
+            } else {
+                showToast(`浏览器下载测速完成：${done} 个 IP`, 'success');
+            }
         } finally {
             setIsBrowserSpeedTesting(false);
+            setSpeedPending({});
+            if (speedAbortRef.current === controller) speedAbortRef.current = null;
         }
+    };
+
+    const abortSpeedTest = () => speedAbortRef.current?.abort();
+    const abortPurityCheck = () => purityAbortRef.current?.abort();
+    const abortAllTests = () => {
+        speedAbortRef.current?.abort();
+        purityAbortRef.current?.abort();
     };
 
     const handleCombinedSpeedPurityTest = async () => {
@@ -305,21 +348,75 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
             showToast('请先勾选一个或多个可检测的 IPv4 IP', 'warning');
             return;
         }
+        const controller = new AbortController();
+        purityAbortRef.current = controller;
+        const signal = controller.signal;
         setIsCheckingPurity(true);
+        setPurityDone(0);
+        setPurityTotal(ips.length);
+        setPurityFailed({});
+        setPurityPending(Object.fromEntries(ips.map(ip => [ip, true as const])));
+
+        // 小批量 + 少量并发：每批返回后立即写入 purityMap，表格里的纯净度即时显示。
+        // （后端单次上限 20 个，这里取 5 个一批，让结果更快出现。）
+        const BATCH_SIZE = 5;
+        const CONCURRENCY = 2;
+        const batches: string[][] = [];
+        for (let i = 0; i < ips.length; i += BATCH_SIZE) batches.push(ips.slice(i, i + BATCH_SIZE));
+
+        let done = 0;
+        let okCount = 0;
+        let firstError = '';
+        let authFailed = false;
         try {
-            // Worker 单次最多检测 20 个 IP，低于 Cloudflare 子请求上限；逐批检测以支持大量结果。
-            const merged: Record<string, import('../api').PurityResult> = {};
-            for (let i = 0; i < ips.length; i += 20) {
-                const batch = ips.slice(i, i + 20);
-                const data = await checkPurity(batch);
-                Object.assign(merged, data);
+            const worker = async () => {
+                while (batches.length && !signal.aborted) {
+                    const batch = batches.shift();
+                    if (!batch) return;
+                    try {
+                        const data = await checkPurity(batch, signal);
+                        okCount += Object.keys(data).length;
+                        setPurityMap(prev => ({ ...prev, ...data }));
+                        const missing = batch.filter(ip => !data[ip]);
+                        if (missing.length > 0) {
+                            setPurityFailed(prev => ({ ...prev, ...Object.fromEntries(missing.map(ip => [ip, true as const])) }));
+                        }
+                    } catch (e) {
+                        if (signal.aborted) return;
+                        const msg = e instanceof Error ? e.message : '未知错误';
+                        if (!firstError) firstError = msg;
+                        setPurityFailed(prev => ({ ...prev, ...Object.fromEntries(batch.map(ip => [ip, true as const])) }));
+                        // 登录失效时继续请求没有意义，直接中止剩余批次
+                        if (msg.includes('登录已过期')) {
+                            authFailed = true;
+                            controller.abort();
+                            return;
+                        }
+                    }
+                    setPurityPending(prev => {
+                        const next = { ...prev };
+                        batch.forEach(ip => delete next[ip]);
+                        return next;
+                    });
+                    done += batch.length;
+                    setPurityDone(done);
+                }
+            };
+            await Promise.all(Array.from({ length: Math.min(CONCURRENCY, batches.length) }, () => worker()));
+
+            if (authFailed) {
+                showToast(`纯净度检测失败：${firstError}`, 'error');
+            } else if (signal.aborted) {
+                showToast(`已中断纯净度检测：已完成 ${done}/${ips.length}，成功 ${okCount} 个`, 'warning');
+            } else if (okCount === 0 && firstError) {
+                showToast(`纯净度检测失败：${firstError}`, 'error');
+            } else {
+                showToast(`纯净度检测完成：${okCount}/${ips.length}`, 'success');
             }
-            setPurityMap(merged);
-            showToast(`纯净度检测完成：${Object.keys(merged).length}/${ips.length}`, 'success');
-        } catch (e) {
-            showToast(`纯净度检测失败：${e instanceof Error ? e.message : '未知错误'}`, 'error');
         } finally {
             setIsCheckingPurity(false);
+            setPurityPending({});
+            if (purityAbortRef.current === controller) purityAbortRef.current = null;
         }
     };
 
@@ -373,9 +470,18 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                         <div className="flex items-center gap-4 mb-4 pb-3 border-b border-gray-200 dark:border-gray-600">
                             <div className="flex items-center gap-4 flex-wrap">
                                 <h3 className="text-sm font-bold text-gray-700 dark:text-gray-200">筛选与操作（勾选项共用于测速、纯净度检测和 KV 保存）:</h3>
-                                <button onClick={() => void handlePurity()} disabled={isCheckingPurity || selectedVisibleSpeedKeys.length === 0} className="px-3 py-1 text-xs font-medium rounded-full bg-emerald-100 text-emerald-700 hover:bg-emerald-200 disabled:opacity-50 dark:bg-emerald-900/40 dark:text-emerald-300">{isCheckingPurity ? '检测中...' : `检测勾选项纯净度 (${selectedVisibleSpeedKeys.length})`}</button>
-                                <button onClick={() => void handleBrowserSpeedTest()} disabled={isBrowserSpeedTesting || selectedVisibleSpeedKeys.length === 0} className="px-3 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-700 hover:bg-blue-200 disabled:opacity-50 dark:bg-blue-900/40 dark:text-blue-300">{isBrowserSpeedTesting ? `测速中 ${browserSpeedDone}/${selectedVisibleSpeedKeys.length}` : `浏览器测速 (${selectedVisibleSpeedKeys.length})`}</button>
+                                <button onClick={() => void handlePurity()} disabled={isCheckingPurity || selectedVisibleSpeedKeys.length === 0} className="px-3 py-1 text-xs font-medium rounded-full bg-emerald-100 text-emerald-700 hover:bg-emerald-200 disabled:opacity-50 dark:bg-emerald-900/40 dark:text-emerald-300">{isCheckingPurity ? `检测中 ${purityDone}/${purityTotal}` : `检测勾选项纯净度 (${selectedVisibleSpeedKeys.length})`}</button>
+                                <button onClick={() => void handleBrowserSpeedTest()} disabled={isBrowserSpeedTesting || selectedVisibleSpeedKeys.length === 0} className="px-3 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-700 hover:bg-blue-200 disabled:opacity-50 dark:bg-blue-900/40 dark:text-blue-300">{isBrowserSpeedTesting ? `测速中 ${browserSpeedDone}/${browserSpeedTotal}` : `浏览器测速 (${selectedVisibleSpeedKeys.length})`}</button>
                                 <button onClick={() => void handleCombinedSpeedPurityTest()} disabled={isBrowserSpeedTesting || isCheckingPurity || selectedVisibleSpeedKeys.length === 0} className="px-3 py-1 text-xs font-medium rounded-full bg-violet-100 text-violet-700 hover:bg-violet-200 disabled:opacity-50 dark:bg-violet-900/40 dark:text-violet-300">一键测速 + 纯净度</button>
+                                {isBrowserSpeedTesting && (
+                                    <button onClick={abortSpeedTest} title="立即中止所有下载测速请求" className="px-3 py-1 text-xs font-medium rounded-full bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/40 dark:text-red-300">■ 中断测速</button>
+                                )}
+                                {isCheckingPurity && (
+                                    <button onClick={abortPurityCheck} title="立即中止纯净度检测请求" className="px-3 py-1 text-xs font-medium rounded-full bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/40 dark:text-red-300">■ 中断纯净度</button>
+                                )}
+                                {isBrowserSpeedTesting && isCheckingPurity && (
+                                    <button onClick={abortAllTests} title="同时中止下载测速和纯净度检测" className="px-3 py-1 text-xs font-bold rounded-full bg-red-600 text-white hover:bg-red-700">■ 强行中断全部</button>
+                                )}
                                 <button onClick={() => void handlePacketLossTest()} disabled={isPacketLossTesting || selectedVisibleSpeedKeys.length === 0} title="每个 IP 发送 10 次 HTTPS 探测；这不是 ICMP ping" className="px-3 py-1 text-xs font-medium rounded-full bg-amber-100 text-amber-800 hover:bg-amber-200 disabled:opacity-50 dark:bg-amber-900/40 dark:text-amber-300">{isPacketLossTesting ? `丢包测试 ${packetLossDone}/${selectedVisibleSpeedKeys.length}` : `丢包率测试 (${selectedVisibleSpeedKeys.length})`}</button>
                                 <button onClick={() => { setBrowserSpeedMap({}); setBrowserSpeedErrors({}); setPacketLossMap({}); setSelectedSpeedTargets(new Set()); }} disabled={isBrowserSpeedTesting || (Object.keys(browserSpeedMap).length === 0 && Object.keys(browserSpeedErrors).length === 0 && Object.keys(packetLossMap).length === 0)} className="px-3 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-600 dark:text-gray-200 dark:hover:bg-gray-500">清除测速结果</button>
                                 <div className="flex items-center gap-2 flex-wrap">
@@ -675,11 +781,11 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{port}</td>
                                             <td className={`px-6 py-4 whitespace-nowrap text-sm font-bold ${getLatencyColor(latency)}`}>{latency > -1 ? `${latency}ms` : 'N/A'}</td>
                                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{colo ? <RegionDisplay colo={colo} flagSize="sm" /> : '-'}</td>
-                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-blue-600 dark:text-blue-400">{displayDownloadMbps({ ip, port, latency, colo, domain, downloadMbps, isAvailable: true }) > 0 ? `${displayDownloadMbps({ ip, port, latency, colo, domain, downloadMbps, isAvailable: true }).toFixed(2)} Mbps` : (browserSpeedErrors[`${ip}:${port}`] ? '失败' : '-')}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-blue-600 dark:text-blue-400">{displayDownloadMbps({ ip, port, latency, colo, domain, downloadMbps, isAvailable: true }) > 0 ? `${displayDownloadMbps({ ip, port, latency, colo, domain, downloadMbps, isAvailable: true }).toFixed(2)} Mbps` : (browserSpeedErrors[`${ip}:${port}`] ? '失败' : speedPending[`${ip}:${port}`] ? <span className="text-gray-400 animate-pulse">测速中…</span> : '-')}</td>
                                             <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold">{packetLossMap[`${ip}:${port}`] ? (packetLossMap[`${ip}:${port}`].error ? <span className="text-red-500" title={packetLossMap[`${ip}:${port}`].error}>不可测</span> : <span className={packetLossMap[`${ip}:${port}`].packetLoss === 0 ? 'text-green-600 dark:text-green-400' : packetLossMap[`${ip}:${port}`].packetLoss < 20 ? 'text-amber-600 dark:text-amber-400' : 'text-red-600 dark:text-red-400'}>{packetLossMap[`${ip}:${port}`].packetLoss}% <span className="font-normal text-xs text-gray-500">({packetLossMap[`${ip}:${port}`].received}/{packetLossMap[`${ip}:${port}`].sent})</span></span>) : '-'}</td>
                                             <td className="px-6 py-4 whitespace-nowrap text-sm">
                                                 <div className="flex items-center gap-2">
-                                                    {purity ? <span className={purity.purityScore >= 90 ? 'text-green-600 dark:text-green-400' : purity.purityScore >= 70 ? 'text-yellow-600 dark:text-yellow-400' : 'text-red-600 dark:text-red-400'}>{purity.purityScore} / 100</span> : '-'}
+                                                    {purity ? <span className={purity.purityScore >= 90 ? 'text-green-600 dark:text-green-400' : purity.purityScore >= 70 ? 'text-yellow-600 dark:text-yellow-400' : 'text-red-600 dark:text-red-400'}>{purity.purityScore} / 100</span> : (purityFailed[ip] ? <span className="text-red-500" title="检测失败或上游无结果">失败</span> : purityPending[ip] ? <span className="text-gray-400 animate-pulse">检测中…</span> : '-')}
                                                     {purity && (
                                                         <button type="button" title="查看纯净度详情" onClick={() => setExpandedPurityIp(expanded ? null : `${ip}:${port}`)} className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-500 dark:text-gray-300">
                                                             {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}

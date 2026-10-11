@@ -277,9 +277,10 @@ export interface PurityResult {
     confidence: string;
 }
 
-export async function checkPurity(ips: string[]): Promise<Record<string, PurityResult>> {
+export async function checkPurity(ips: string[], signal?: AbortSignal): Promise<Record<string, PurityResult>> {
     const response = await authedFetch('/api/purity', {
         method: 'POST',
+        signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ips }),
     });

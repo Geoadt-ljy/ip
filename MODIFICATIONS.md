@@ -8,7 +8,7 @@
 4. 下载测速复用页面的线程数。
 5. 下载测速地址、时间可配置。
 6. 新增 FFraud 纯净度 Pages Function 和结果页检测按钮。
-7. `wrangler.toml` 增加 `pages_build_output_dir = "dist"`，避免 Pages 的 Wrangler 配置警告。
+7. `wrangler.toml` 不再包含 `pages_build_output_dir` 和 KV id，改为在 Cloudflare Dashboard 中绑定 `IP_KV`（否则 Wrangler 配置文件会覆盖 Dashboard 设置）。
 8. 更新 `public/local-agent.zip` 为增强后的 Agent。
 ### 2026-10-09：下载测速与 IP 筛选增强
 - 修复本地 Agent 下载测速：测速计时从实际 HTTP 下载请求开始，取消下载阶段的错误空闲超时，并正确统计 HTTP body 字节。
@@ -30,3 +30,10 @@
 - Added a combined “一键测速 + 纯净度” action.
 - Browser-measured download speed and purity results are saved as optional fields without changing the existing `IP:port#region|scene|latency` line format. TXT exports append `|下载:xxMbps|纯净度:xx/100` after the original comment fields; CSV adds two optional columns.
 - Added Pages `_headers` rules to prevent stale HTML/cache from making the normal browser show a blank page after deployments.
+
+## 2026-10-11：纯净度即时显示与强行中断
+- 纯净度检测改为每 5 个 IP 一批、2 路并发，每批返回后立即写入结果表，不再等全部完成；检测中的行显示“检测中…”，失败的行显示“失败”，按钮显示 `检测中 已完成/总数`。
+- 重复检测时合并到已有纯净度结果，不再整体覆盖。
+- 新增“■ 中断测速”“■ 中断纯净度”按钮，一键测速 + 纯净度同时运行时还会出现“■ 强行中断全部”。
+- 中断通过 AbortController 立即取消进行中的 fetch 和下载流；被中断的 IP 保持“未测”状态，不记为失败，已完成的结果全部保留。
+- 登录失效（401）时自动中止剩余纯净度批次；扫描结果变化或离开页面时也会自动中断旧任务。

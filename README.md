@@ -76,11 +76,12 @@
     -   `APITOKEN`: 订阅链接用的，也随便一长串。
 
 #### b. 绑定 KV 存储
--   进入 `Settings` -> `Functions`。
--   向下滚动到 `KV Namespace Bindings`，点击 `Add binding`。
+-   进入 `Settings（设置）` -> `Bindings（绑定）`（旧界面为 `Functions` -> `KV Namespace Bindings`）。
+-   点击 `Add binding`，选择 KV namespace。
     -   **Variable name** (变量名): **必须**填写 `IP_KV`。
     -   **KV namespace** (KV 命名空间): 选择你在 **步骤 2** 创建的那个 KV 命名空间。
--   点击 `Save`。
+-   **Production 和 Preview 两个环境都要绑定**，然后点击 `Save`。
+-   说明：仓库中的 `wrangler.toml` 刻意不含 KV 配置和 `pages_build_output_dir`，线上绑定以 Dashboard 为准；部署日志里的 Wrangler 配置警告可忽略。
 
 ### 步骤 5: 重新部署，大功告成！
 

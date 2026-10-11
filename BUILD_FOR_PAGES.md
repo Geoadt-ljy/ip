@@ -7,11 +7,13 @@
 - Build command: `npm run build`
 - Build output directory: `dist`
 - Node.js: 18+
-- `wrangler.toml` 已包含 `pages_build_output_dir = "dist"`
+- `wrangler.toml` 刻意不包含 `pages_build_output_dir` 和 KV 配置：线上绑定在 Cloudflare Dashboard 中配置。部署时出现“字段缺失、配置文件仅用于本地开发”的警告属正常现象，可忽略。
 
 ## KV
 
-继续绑定原来的 `IP_KV`，不要新建 KV，也不要修改原 KV ID。
+在 Dashboard（Settings → Bindings）里绑定原来的 KV 命名空间，变量名必须为 `IP_KV`，Production 和 Preview 都要绑定。不要新建 KV，否则原有数据不会出现。
+
+本地开发由 `npm run dev` 的 `--kv=IP_KV` 提供模拟 KV，无需在 `wrangler.toml` 中声明。
 
 ## 新增功能
 

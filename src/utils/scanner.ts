@@ -219,8 +219,12 @@ export interface BrowserDownloadOptions {
 export async function testBrowserDownloadSpeed(
     ip: string,
     port: number,
-    options: { bytes?: number; timeoutMs?: number; urlTemplate?: string } = {}
-): Promise<{ downloadMbps: number; downloadBytes: number; downloadMs: number; error?: string }> {
+    options: { bytes?: number; timeoutMs?: number; urlTemplate?: string; signal?: AbortSignal } = {}
+): Promise<{ downloadMbps: number; downloadBytes: number; downloadMs: number; error?: string; aborted?: boolean }> {
+    // 外部（用户点击“中断”）触发的取消：立即返回，不当作测速失败记录。
+    const abortedResult = { downloadMbps: 0, downloadBytes: 0, downloadMs: 0, error: '已中断', aborted: true };
+    if (options.signal?.aborted) return abortedResult;
+
     if (isIPv6(ip) || isDomainName(ip)) {
         return { downloadMbps: 0, downloadBytes: 0, downloadMs: 0, error: '浏览器测速目前仅支持 IPv4 IP' };
     }
@@ -277,8 +281,12 @@ export async function testBrowserDownloadSpeed(
             return { downloadMbps: 0, downloadBytes: 0, downloadMs: 0, error: '下载测速地址格式无效' };
         }
 
+        if (options.signal?.aborted) return abortedResult;
         const controller = new AbortController();
         const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+        // 外部中断信号 -> 立即中止 fetch 与正在读取的响应流
+        const onExternalAbort = () => controller.abort();
+        options.signal?.addEventListener('abort', onExternalAbort, { once: true });
         const startedAt = performance.now();
         let receivedBytes = 0;
         try {
@@ -333,12 +341,14 @@ export async function testBrowserDownloadSpeed(
                 downloadMs: Math.round(elapsedMs),
             };
         } catch (error: any) {
+            if (options.signal?.aborted) return abortedResult;
             lastError = error?.name === 'AbortError'
                 ? `下载测速超时（>${Math.round(timeoutMs / 1000)} 秒）`
                 : '测速地址连接失败或未开放 CORS；请切换测速地址';
             const hostDomain = TEST_DOMAIN_CANDIDATES.find(domain => url.hostname.endsWith(`.${domain}`));
             if (hostDomain) clearCachedTestDomain(hostDomain);
         } finally {
+            options.signal?.removeEventListener('abort', onExternalAbort);
             window.clearTimeout(timer);
         }
     }
