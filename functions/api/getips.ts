@@ -140,12 +140,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
             const speed = Number(item.downloadMbps);
             if (Number.isFinite(speed) && speed > 0) {
-                line += `|下载:${speed.toFixed(2)}Mbps`;
+                line += `|${speed.toFixed(2)}Mbps`;
             }
 
             const purityScore = item.purity?.purityScore;
             if (typeof purityScore === 'number' && Number.isFinite(purityScore) && purityScore >= 0 && purityScore <= 100) {
-                line += `|纯净度:${purityScore}/100`;
+                line += `|${purityScore}/100`;
             }
 
             return line;

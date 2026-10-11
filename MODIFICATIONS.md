@@ -28,7 +28,7 @@
 ## 2026-10-09 follow-up
 - Added shared IPv4 checkbox selection for browser download testing, purity checks, and optional selected-only KV saving.
 - Added a combined “一键测速 + 纯净度” action.
-- Browser-measured download speed and purity results are saved as optional fields without changing the existing `IP:port#region|scene|latency` line format. TXT exports append `|下载:xxMbps|纯净度:xx/100` after the original comment fields; CSV adds two optional columns.
+- Browser-measured download speed and purity results are saved as optional fields without changing the existing `IP:port#region|scene|latency` line format. TXT exports and /api/getips append `|xx.xxMbps|xx/100`（无“下载:”“纯净度:”标签） after the original comment fields; CSV adds two optional columns.
 - Added Pages `_headers` rules to prevent stale HTML/cache from making the normal browser show a blank page after deployments.
 
 ## 2026-10-11：纯净度即时显示与强行中断

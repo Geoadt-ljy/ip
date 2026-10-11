@@ -168,8 +168,8 @@ export function SavedIpList() {
                 const regionName = getColoName(item.colo || '');
                 const sceneName = item.sceneName;
                 const latency = `${item.latency}ms`;
-                const speedComment = typeof item.downloadMbps === 'number' && item.downloadMbps > 0 ? `|下载:${item.downloadMbps.toFixed(2)}Mbps` : '';
-                const purityComment = typeof item.purity?.purityScore === 'number' ? `|纯净度:${item.purity.purityScore}/100` : '';
+                const speedComment = typeof item.downloadMbps === 'number' && item.downloadMbps > 0 ? `|${item.downloadMbps.toFixed(2)}Mbps` : '';
+                const purityComment = typeof item.purity?.purityScore === 'number' ? `|${item.purity.purityScore}/100` : '';
                 const comment = `${regionName}|${sceneName}|${latency}${speedComment}${purityComment}`;
                 txtContent += `${item.ip}:${item.port}#${comment}\n`;
             }
@@ -201,8 +201,8 @@ export function SavedIpList() {
             const regionName = getColoName(item.colo || '').replace(/^(\p{Regional_Indicator}+)\s+/u, '$1');
             const sceneName = item.sceneName;
             const latency = `${item.latency}ms`;
-            const speedComment = typeof item.downloadMbps === 'number' && item.downloadMbps > 0 ? `|下载:${item.downloadMbps.toFixed(2)}Mbps` : '';
-            const purityComment = typeof item.purity?.purityScore === 'number' ? `|纯净度:${item.purity.purityScore}/100` : '';
+            const speedComment = typeof item.downloadMbps === 'number' && item.downloadMbps > 0 ? `|${item.downloadMbps.toFixed(2)}Mbps` : '';
+            const purityComment = typeof item.purity?.purityScore === 'number' ? `|${item.purity.purityScore}/100` : '';
             const comment = `${regionName}|${sceneName}|${latency}${speedComment}${purityComment}`;
             txtContent += `${item.ip}:${item.port}#${comment}\n`;
         }
