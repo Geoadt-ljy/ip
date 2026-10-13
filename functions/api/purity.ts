@@ -32,9 +32,23 @@ function purityFromFraud(r: FfraudResponse): { score: number; label: string } {
   };
 }
 
+function validIpv4(value: string): boolean {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value);
+  return !!m && m.slice(1).every(part => Number(part) <= 255);
+}
+
+function validIpv6(value: string): boolean {
+  if (value.length > 45 || !value.includes(':') || !/^[0-9a-fA-F:.]+$/.test(value)) return false;
+  try {
+    new URL(`http://[${value}]/`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function validIp(value: string): boolean {
-  // Accept IPv4 and IPv6. The upstream API performs the final validation.
-  return /^(?:\d{1,3}\.){3}\d{1,3}$/.test(value) || value.includes(':');
+  return validIpv4(value) || validIpv6(value);
 }
 
 export const onRequestPost: PagesFunction = async ({ request }) => {

@@ -1,3 +1,5 @@
+import { timingSafeEqual } from '../_lib/auth';
+
 interface Env {
     IP_KV: KVNamespace;
     APITOKEN?: string;
@@ -85,7 +87,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
          return new Response('System error: APITOKEN not configured', { status: 500 });
     }
 
-    if (token !== env.APITOKEN) {
+    if (!token || !(await timingSafeEqual(token, env.APITOKEN))) {
         return new Response('TOKEN不合法', { status: 401 });
     }
 

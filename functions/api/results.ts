@@ -2,6 +2,25 @@ interface Env {
   IP_KV: KVNamespace;
 }
 
+// 输入限制：防止往 KV 写入超大或畸形数据
+const SCENE_NAME_MAX = 64;
+const MAX_ITEMS = 20000;
+
+function validSceneName(v: unknown): v is string {
+  return typeof v === 'string' && v.trim().length > 0 && v.length <= SCENE_NAME_MAX && !/[\u0000-\u001f\u007f]/.test(v);
+}
+
+function validItems(v: unknown): v is any[] {
+  return Array.isArray(v) && v.length <= MAX_ITEMS && v.every(
+    item => item && typeof item === 'object' && typeof item.ip === 'string' && item.ip.length > 0 && item.ip.length <= 255
+  );
+}
+
+const badRequest = (message: string) => new Response(JSON.stringify({ message }), {
+  status: 400,
+  headers: { 'Content-Type': 'application/json' }
+});
+
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   const { request, env } = context;
 
@@ -10,10 +29,13 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const { sceneName, results, mode } = body;
 
     if (!sceneName || !results) {
-      return new Response(JSON.stringify({ message: '缺少必要参数' }), { 
-        status: 400,
-        headers: { 'Content-Type': 'application/json' }
-      });
+      return badRequest('缺少必要参数');
+    }
+    if (!validSceneName(sceneName)) {
+      return badRequest(`场景名无效（不能为空，最长 ${SCENE_NAME_MAX} 个字符，不能含控制字符）`);
+    }
+    if (!validItems(results)) {
+      return badRequest(`结果数据无效（最多 ${MAX_ITEMS} 条，且每条必须包含 ip 字段）`);
     }
 
     // 确保在 Cloudflare Pages 后台绑定了名为 IP_KV 的 KV 命名空间
@@ -38,6 +60,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       finalResults = results;
     }
 
+    if (finalResults.length > MAX_ITEMS) {
+      return badRequest(`该场景条目数超过上限 ${MAX_ITEMS}，请先清理旧数据或改用覆盖模式`);
+    }
+
     await env.IP_KV.put(key, JSON.stringify(finalResults));
 
     return new Response(JSON.stringify({ success: true, count: finalResults.length }), { headers: { 'Content-Type': 'application/json' } });
@@ -51,6 +77,10 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   const url = new URL(request.url);
   const sceneName = url.searchParams.get('scene');
   
+  if (sceneName && !validSceneName(sceneName)) {
+    return badRequest('场景名无效');
+  }
+
   const headers = {
     'Content-Type': 'application/json',
     'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
@@ -80,8 +110,8 @@ export const onRequestDelete: PagesFunction<Env> = async (context) => {
   const url = new URL(request.url);
   const sceneName = url.searchParams.get('scene');
 
-  if (!sceneName) {
-    return new Response(JSON.stringify({ message: 'Missing scene name' }), { status: 400 });
+  if (!sceneName || !validSceneName(sceneName)) {
+    return new Response(JSON.stringify({ message: 'Missing or invalid scene name' }), { status: 400 });
   }
 
   try {

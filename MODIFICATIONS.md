@@ -37,3 +37,12 @@
 - 新增“■ 中断测速”“■ 中断纯净度”按钮，一键测速 + 纯净度同时运行时还会出现“■ 强行中断全部”。
 - 中断通过 AbortController 立即取消进行中的 fetch 和下载流；被中断的 IP 保持“未测”状态，不记为失败，已完成的结果全部保留。
 - 登录失效（401）时自动中止剩余纯净度批次；扫描结果变化或离开页面时也会自动中断旧任务。
+
+## 2026-10-13：安全加固（无需新增任何配置，推送代码即生效）
+- 登录令牌改为 HMAC-SHA256 签名令牌，有效期 7 天；`/api/login` 不再返回 `JWT_SECRET` 原文，中间件校验签名与过期时间（密钥仍用已有的 `JWT_SECRET`）。上线后旧的登录状态会失效，需要重新登录一次。
+- `LOGINPW`、`APITOKEN` 改为恒定时间比较（`functions/_lib/auth.ts`）。
+- 登录失败限速：同一来源 IP 连续失败 5 次后锁定 15 分钟（计数存在已有的 `IP_KV`，key 前缀 `rl:login:`，KV 最终一致，属软限速）。
+- `/api/third_party_ips?url=` 只接受 http/https 链接，源内容超过 5MB 视为失败；`/api/sources` 保存时校验为 http/https 链接（最多 50 个）。Pages Functions 运行在 Cloudflare 边缘，访问不到内网，因此不再限制只能抓取已保存的地址。
+- `/api/results` 校验场景名（≤64 字符、无控制字符）和条目（≤20000 条，每条必须有 `ip` 字段）。
+- `/api/purity` 的 IP 校验改严格（IPv4 每段 ≤255，IPv6 需可解析）。
+- 未改动：`getips` 仍兼容 `api_token`/`apitoken`/`key` 参数别名；本地 Agent 的 CORS 限制待确定站点域名后再加。

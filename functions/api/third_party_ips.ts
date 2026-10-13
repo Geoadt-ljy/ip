@@ -83,6 +83,9 @@ async function fetchOne(srcUrl: string): Promise<SourceResult> {
             return { url: srcUrl, status: 'error', code: r.status, error: `Status ${r.status}` };
         }
         const text = await r.text();
+        if (text.length > 5 * 1024 * 1024) {
+            return { url: srcUrl, status: 'error', error: '源内容过大（超过 5MB）' };
+        }
         return { url: srcUrl, status: 'ok', text };
     } catch (err) {
         if ((err as Error).name === 'AbortError') {
@@ -137,7 +140,17 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
 
     // 单源模式：?url=xxx —— 每次调用只发 1 个子请求，规避 CF 子请求总数上限
     if (target) {
-        const result = await fetchOne(target);
+        // 只接受 http/https 链接（Pages Functions 运行在 Cloudflare 边缘，访问不到内网）
+        const wanted = target.trim();
+        let wantedUrl: URL | null = null;
+        try { wantedUrl = new URL(wanted); } catch { /* invalid */ }
+        if (!wantedUrl || (wantedUrl.protocol !== 'https:' && wantedUrl.protocol !== 'http:')) {
+            return new Response(JSON.stringify({ message: '源地址无效' }), {
+                status: 400,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        const result = await fetchOne(wanted);
         const stat = buildSourceStat(result);
         return new Response(JSON.stringify(stat), {
             headers: { 'Content-Type': 'application/json' }

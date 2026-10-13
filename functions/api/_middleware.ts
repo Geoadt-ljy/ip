@@ -1,3 +1,5 @@
+import { verifyToken } from '../_lib/auth';
+
 interface Env {
     JWT_SECRET: string;
 }
@@ -27,8 +29,8 @@ export const onRequest: PagesFunction<Env> = async (context) => {
         return new Response('Internal Server Error: Auth is not configured.', { status: 500 });
     }
 
-    // 简单比对 Token 是否等于环境变量中的 JWT_SECRET
-    if (token === env.JWT_SECRET) {
+    // 校验签名令牌（HMAC 签名 + 过期时间），不再直接比对 JWT_SECRET 原文
+    if (await verifyToken(env.JWT_SECRET, token)) {
         return await next(); // 验证通过，放行请求到具体的接口函数
     } else {
         return new Response('Unauthorized: Invalid or expired token.', { status: 401 });
