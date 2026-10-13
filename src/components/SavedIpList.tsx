@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react';
-import { getScenes, getSceneResults, saveResults } from '../api';
-import { getLatencyColor, ScanResult } from '../utils/scanner';
+import { useState, useEffect, useRef, ChangeEvent } from 'react';
+import { getScenes, getSceneResults, saveResults, deleteScene, renameScene } from '../api';
+import { getLatencyColor, ScanResult, testIpLatency, testBrowserDownloadSpeed, resolveDomainToIp } from '../utils/scanner';
+import { compositeScore } from '../../functions/_lib/score';
 import { getColoName } from '../utils/colo';
 import { useToast } from './Toast';
 import { useConfirm } from './ConfirmDialog'; // Import Trash2 and RotateCw
-import { ListChecks, Trash2, RotateCw, FileText, File, Copy } from 'lucide-react';
+import { ListChecks, Trash2, RotateCw, FileText, File, Copy, Pencil, Settings2, Download, Upload, Activity, Save, Square } from 'lucide-react';
 import { RegionDisplay } from './RegionDisplay';
 
 // Type for data stored in KV, which does not include `isAvailable`
@@ -16,10 +17,33 @@ interface SavedIpData {
     domain?: boolean; // 是否为域名源
     downloadMbps?: number;
     purity?: { purityScore?: number; purityLabel?: string };
+    testedAt?: number; // 最近一次测试/保存时间（毫秒时间戳），旧数据没有该字段
 }
 interface FlatIpItem extends SavedIpData {
     sceneName: string;
 }
+
+type SortKey = 'latency' | 'speed' | 'purity' | 'score' | 'recent';
+
+const itemId = (i: FlatIpItem) => `${i.ip}:${i.port}#${i.sceneName}`;
+
+// 复测参数
+const RETEST_TIMEOUT_MS = 3000;       // 延迟复测超时
+const RETEST_LATENCY_WORKERS = 8;     // 延迟复测并发
+const RETEST_SPEED_WORKERS = 2;       // 速度复测并发
+const RETEST_SPEED_BYTES = 25 * 1024 * 1024; // 与首次测速一致，保证数值可比
+const SPEED_DROP_RATIO = 0.5;         // 复测速度低于原来的 50% 视为明显下降
+const STALE_MS = 7 * 24 * 3600 * 1000; // 超过 7 天标为“较旧”
+
+const formatAge = (ts?: number): string => {
+    if (!ts) return '-';
+    const minutes = Math.floor((Date.now() - ts) / 60000);
+    if (minutes < 1) return '刚刚';
+    if (minutes < 60) return `${minutes} 分钟前`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours} 小时前`;
+    return `${Math.floor(hours / 24)} 天前`;
+};
 
 export function SavedIpList() {
     const [items, setItems] = useState<FlatIpItem[]>([]);
@@ -29,12 +53,31 @@ export function SavedIpList() {
     const { showToast } = useToast();
     const { confirm } = useConfirm();
 
+    const [sceneList, setSceneList] = useState<string[]>([]); // 全部分组（包含没有 IP 的空分组）
+    const [sortKey, setSortKey] = useState<SortKey>('latency');
+    const [showManage, setShowManage] = useState(false);
+    const [editingScene, setEditingScene] = useState<string | null>(null);
+    const [editValue, setEditValue] = useState('');
+    const [retesting, setRetesting] = useState(false);
+    const [retestDone, setRetestDone] = useState(0);
+    const [retestTotal, setRetestTotal] = useState(0);
+    const [includeSpeedRetest, setIncludeSpeedRetest] = useState(false);
+    const [retestFlags, setRetestFlags] = useState<Record<string, string>>({}); // 失效原因：id -> 说明
+    const [dirtyScenes, setDirtyScenes] = useState<Set<string>>(new Set());     // 复测后有改动、尚未保存的分组
+    const retestAbortRef = useRef<AbortController | null>(null);
+
+    // 离开页面时中断复测
+    useEffect(() => () => { retestAbortRef.current?.abort(); }, []);
+
     const loadData = async () => {
         setLoading(true);
         setItems([]); // Clear items before loading to avoid confusion
         try {
             // 1. 获取所有场景名
             const scenes = await getScenes();
+            setSceneList(scenes.map(sc => sc.name));
+            setRetestFlags({});
+            setDirtyScenes(new Set());
             
             // 2. 并行获取所有场景的详细数据
             const promises = scenes.map(async (scene) => {
@@ -65,8 +108,16 @@ export function SavedIpList() {
 
     const uniqueScenes = Array.from(new Set(items.map(i => i.sceneName))).sort();
     const filteredItems = items.filter(i => selectedScenes.has(i.sceneName));
+    const latencyOrder = (v: number) => (v > 0 ? v : Number.MAX_SAFE_INTEGER); // 延迟失败（-1）的排最后
     const filteredItemsSorted = [...filteredItems].sort((a, b) => {
-        return a.latency - b.latency;
+        const byLatency = latencyOrder(a.latency) - latencyOrder(b.latency);
+        switch (sortKey) {
+            case 'speed': return (b.downloadMbps || 0) - (a.downloadMbps || 0) || byLatency;
+            case 'purity': return (b.purity?.purityScore ?? -1) - (a.purity?.purityScore ?? -1) || byLatency;
+            case 'score': return compositeScore(b) - compositeScore(a) || byLatency;
+            case 'recent': return (b.testedAt || 0) - (a.testedAt || 0) || byLatency;
+            default: return byLatency;
+        }
     });
 
     const handleCheckboxChange = (id: string, checked: boolean) => {
@@ -113,6 +164,253 @@ export function SavedIpList() {
             await loadData();
         } catch (e) {
             showToast('删除失败', 'error');
+            setLoading(false);
+        }
+    };
+
+    // 把指定分组按当前内存中的数据整体写回（覆盖）
+    const persistScenes = async (scenesToSave: Iterable<string>, source: FlatIpItem[]) => {
+        for (const scene of scenesToSave) {
+            const list = source.filter(i => i.sceneName === scene).map(({ sceneName: _unused, ...rest }) => rest);
+            await saveResults(scene, list as ScanResult[], 'overwrite');
+        }
+    };
+
+    // ---------------- 分组管理 ----------------
+    const manageNames = Array.from(new Set([...sceneList, ...items.map(i => i.sceneName)])).sort();
+
+    const submitRename = async (from: string) => {
+        const to = editValue.trim();
+        if (!to || to === from) {
+            setEditingScene(null);
+            return;
+        }
+        try {
+            await renameScene(from, to);
+            showToast(`已将分组「${from}」重命名为「${to}」`, 'success');
+            setEditingScene(null);
+            await loadData();
+        } catch (e) {
+            showToast(`重命名失败: ${e instanceof Error ? e.message : '未知错误'}`, 'error');
+        }
+    };
+
+    const handleDeleteScene = async (name: string) => {
+        const count = items.filter(i => i.sceneName === name).length;
+        const ok = await confirm(`确定要删除分组「${name}」吗？其中的 ${count} 个 IP/域名会一并删除，此操作不可恢复。`, { confirmText: '确定删除' });
+        if (!ok) return;
+        try {
+            await deleteScene(name);
+            showToast(`已删除分组「${name}」`, 'success');
+            await loadData();
+        } catch (e) {
+            showToast(`删除失败: ${e instanceof Error ? e.message : '未知错误'}`, 'error');
+        }
+    };
+
+    // ---------------- 复测 ----------------
+    const handleRetest = async () => {
+        const targets = selectedItems.size > 0
+            ? filteredItems.filter(i => selectedItems.has(itemId(i)))
+            : filteredItems;
+        if (targets.length === 0) {
+            showToast('没有可复测的数据', 'warning');
+            return;
+        }
+
+        const controller = new AbortController();
+        retestAbortRef.current = controller;
+        const signal = controller.signal;
+        setRetesting(true);
+        setRetestDone(0);
+        setRetestTotal(targets.length);
+        setRetestFlags({});
+
+        const updates = new Map<string, Partial<FlatIpItem>>();
+        const flags: Record<string, string> = {};
+        let done = 0;
+        let latencyOk = 0;
+
+        try {
+            // 阶段一：复测延迟
+            const queue = [...targets];
+            const latencyWorker = async () => {
+                while (queue.length > 0 && !signal.aborted) {
+                    const item = queue.shift();
+                    if (!item) return;
+                    const id = itemId(item);
+                    let host = item.ip;
+                    if (item.domain) {
+                        const resolved = await resolveDomainToIp(item.ip);
+                        if (!resolved) {
+                            flags[id] = '域名解析失败';
+                            done++;
+                            setRetestDone(done);
+                            continue;
+                        }
+                        host = resolved;
+                    }
+                    const r = await testIpLatency(host, item.port, RETEST_TIMEOUT_MS);
+                    if (r.latency > 0) {
+                        latencyOk++;
+                        updates.set(id, {
+                            latency: r.latency,
+                            ...(r.colo && r.colo !== '-' ? { colo: r.colo } : {}),
+                            testedAt: Date.now(),
+                        });
+                    } else {
+                        flags[id] = '超时/不可达';
+                    }
+                    done++;
+                    setRetestDone(done);
+                }
+            };
+            await Promise.all(Array.from({ length: Math.min(RETEST_LATENCY_WORKERS, targets.length) }, () => latencyWorker()));
+
+            // 阶段二（可选）：只复测“原来测过速度、且延迟复测成功”的 IPv4
+            if (includeSpeedRetest && !signal.aborted) {
+                const speedTargets = targets.filter(i =>
+                    !i.domain && !i.ip.includes(':') && (i.downloadMbps || 0) > 0 && !flags[itemId(i)]
+                );
+                setRetestDone(0);
+                setRetestTotal(speedTargets.length);
+                let speedDone = 0;
+                const speedQueue = [...speedTargets];
+                const speedWorker = async () => {
+                    while (speedQueue.length > 0 && !signal.aborted) {
+                        const item = speedQueue.shift();
+                        if (!item) return;
+                        const id = itemId(item);
+                        const result = await testBrowserDownloadSpeed(item.ip, item.port, {
+                            bytes: RETEST_SPEED_BYTES,
+                            timeoutMs: 30000,
+                            signal,
+                        });
+                        if (result.aborted) return;
+                        const old = item.downloadMbps || 0;
+                        if (result.downloadMbps > 0) {
+                            const ratio = result.downloadMbps / old;
+                            updates.set(id, { ...(updates.get(id) || {}), downloadMbps: result.downloadMbps, testedAt: Date.now() });
+                            if (ratio < SPEED_DROP_RATIO) {
+                                flags[id] = `速度下降 ${Math.round((1 - ratio) * 100)}%（${old.toFixed(1)} → ${result.downloadMbps.toFixed(1)} Mbps）`;
+                            }
+                        } else {
+                            flags[id] = '测速失败';
+                        }
+                        speedDone++;
+                        setRetestDone(speedDone);
+                    }
+                };
+                await Promise.all(Array.from({ length: Math.min(RETEST_SPEED_WORKERS, speedTargets.length) }, () => speedWorker()));
+            }
+
+            // 把复测得到的新数据写进列表（失败项保持原值，只做标记）
+            if (updates.size > 0) {
+                setItems(prev => prev.map(i => (updates.has(itemId(i)) ? { ...i, ...updates.get(itemId(i)) } : i)));
+                const touched = new Set<string>();
+                targets.forEach(i => { if (updates.has(itemId(i))) touched.add(i.sceneName); });
+                setDirtyScenes(prev => new Set([...prev, ...touched]));
+            }
+            setRetestFlags(flags);
+
+            const flagged = Object.keys(flags).length;
+            if (signal.aborted) {
+                showToast(`已中断复测：已完成 ${done}/${targets.length}，其中 ${flagged} 个标记为失效`, 'warning');
+            } else {
+                showToast(`复测完成：延迟可用 ${latencyOk}/${targets.length}，失效 ${flagged} 个${updates.size > 0 ? '。点击「保存复测结果」写回' : ''}`, flagged > 0 ? 'warning' : 'success');
+            }
+        } finally {
+            setRetesting(false);
+            if (retestAbortRef.current === controller) retestAbortRef.current = null;
+        }
+    };
+
+    const handleAbortRetest = () => retestAbortRef.current?.abort();
+
+    const handleSaveRetest = async () => {
+        if (dirtyScenes.size === 0) return;
+        setLoading(true);
+        try {
+            await persistScenes(dirtyScenes, items);
+            setDirtyScenes(new Set());
+            showToast('复测结果已保存', 'success');
+        } catch (e) {
+            showToast(`保存失败: ${e instanceof Error ? e.message : '未知错误'}`, 'error');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const flaggedCount = items.filter(i => retestFlags[itemId(i)]).length;
+
+    const handleDeleteFlagged = async () => {
+        const flagged = items.filter(i => retestFlags[itemId(i)]);
+        if (flagged.length === 0) return;
+        const ok = await confirm(`确定要删除复测标记为失效的 ${flagged.length} 个 IP/域名吗？`, { confirmText: '确定删除' });
+        if (!ok) return;
+        setLoading(true);
+        try {
+            const remaining = items.filter(i => !retestFlags[itemId(i)]);
+            const scenesToSave = new Set<string>([...flagged.map(i => i.sceneName), ...dirtyScenes]);
+            await persistScenes(scenesToSave, remaining);
+            showToast(`已删除 ${flagged.length} 个失效项`, 'success');
+            await loadData();
+        } catch (e) {
+            showToast(`删除失败: ${e instanceof Error ? e.message : '未知错误'}`, 'error');
+            setLoading(false);
+        }
+    };
+
+    // ---------------- 备份 / 恢复 ----------------
+    const handleExportBackup = () => {
+        if (items.length === 0 && manageNames.length === 0) {
+            showToast('没有可备份的数据', 'warning');
+            return;
+        }
+        const scenes: Record<string, unknown[]> = {};
+        manageNames.forEach(name => { scenes[name] = []; });
+        items.forEach(({ sceneName, ...rest }) => { scenes[sceneName].push(rest); });
+        const payload = { app: 'kgcfip-manager', version: 1, exportedAt: new Date().toISOString(), scenes };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8;' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `ip_backup_${new Date().toISOString().slice(0, 10)}.json`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        showToast(`已导出 ${manageNames.length} 个分组、${items.length} 条数据`, 'success');
+    };
+
+    const importInputRef = useRef<HTMLInputElement | null>(null);
+
+    const handleImportFile = async (e: ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        e.target.value = ''; // 允许重复选择同一个文件
+        if (!file) return;
+        if (file.size > 10 * 1024 * 1024) {
+            showToast('备份文件过大（超过 10MB）', 'error');
+            return;
+        }
+        try {
+            const data = JSON.parse(await file.text());
+            const scenesObj = data && typeof data === 'object' && data.scenes && typeof data.scenes === 'object' && !Array.isArray(data.scenes)
+                ? data.scenes as Record<string, unknown>
+                : null;
+            if (!scenesObj) throw new Error('不是有效的备份文件');
+            const entries = Object.entries(scenesObj).filter(([, v]) => Array.isArray(v)) as [string, ScanResult[]][];
+            if (entries.length === 0) throw new Error('备份中没有可导入的分组');
+            const total = entries.reduce((n, [, v]) => n + v.length, 0);
+            const ok = await confirm(`备份中包含 ${entries.length} 个分组、共 ${total} 条数据。导入后会与现有同名分组合并（相同 IP 以备份为准），不会删除现有数据。继续吗？`, { confirmText: '开始导入' });
+            if (!ok) return;
+            setLoading(true);
+            for (const [name, list] of entries) {
+                await saveResults(name, list, 'append');
+            }
+            showToast(`已导入 ${entries.length} 个分组、${total} 条数据`, 'success');
+            await loadData();
+        } catch (err) {
+            showToast(`导入失败: ${err instanceof Error ? err.message : '未知错误'}`, 'error');
+        } finally {
             setLoading(false);
         }
     };
@@ -290,6 +588,126 @@ export function SavedIpList() {
                             </button>
                         </div>
                 </div>
+
+                <div className="flex flex-wrap items-center gap-3 p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                    <label className="flex items-center gap-1.5 text-sm font-medium text-gray-700 dark:text-gray-300 whitespace-nowrap">
+                        排序
+                        <select
+                            value={sortKey}
+                            onChange={(e) => setSortKey(e.target.value as SortKey)}
+                            className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-1 text-xs text-gray-800 dark:text-gray-100"
+                        >
+                            <option value="latency">延迟（低→高）</option>
+                            <option value="speed">下载速度（高→低）</option>
+                            <option value="purity">纯净度（高→低）</option>
+                            <option value="score">综合评分（高→低）</option>
+                            <option value="recent">最近测试</option>
+                        </select>
+                    </label>
+
+                    <span className="hidden sm:block w-px h-5 bg-gray-300 dark:bg-gray-500" />
+
+                    <button
+                        type="button"
+                        onClick={() => void handleRetest()}
+                        disabled={retesting || loading || filteredItems.length === 0}
+                        title="对勾选的 IP 重新测延迟；没有勾选时复测当前列表里的全部"
+                        className="px-3 py-1 text-xs font-medium rounded-full transition-colors disabled:opacity-50 bg-teal-100 text-teal-800 hover:bg-teal-200 dark:bg-teal-900/40 dark:text-teal-300"
+                    >
+                        <Activity className="w-3.5 h-3.5 mr-1 inline-block" />
+                        {retesting ? `复测中 ${retestDone}/${retestTotal}` : `复测${selectedItems.size > 0 ? `勾选项 (${selectedItems.size})` : '当前列表'}`}
+                    </button>
+                    <label className="flex items-center gap-1 text-xs text-gray-600 dark:text-gray-300 cursor-pointer select-none" title="仅复测原来测过速度的 IPv4，每个约消耗 25MB 流量">
+                        <input type="checkbox" checked={includeSpeedRetest} onChange={(e) => setIncludeSpeedRetest(e.target.checked)} disabled={retesting} className="h-3.5 w-3.5 rounded border-gray-300 text-teal-600" />
+                        同时复测下载速度
+                    </label>
+                    {retesting && (
+                        <button type="button" onClick={handleAbortRetest} className="px-3 py-1 text-xs font-medium rounded-full transition-colors disabled:opacity-50 bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/40 dark:text-red-300">
+                            <Square className="w-3 h-3 mr-1 inline-block" />
+                            中断复测
+                        </button>
+                    )}
+                    {dirtyScenes.size > 0 && !retesting && (
+                        <button type="button" onClick={() => void handleSaveRetest()} disabled={loading} className="px-3 py-1 text-xs font-medium rounded-full transition-colors disabled:opacity-50 bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-900/40 dark:text-blue-300">
+                            <Save className="w-3.5 h-3.5 mr-1 inline-block" />
+                            保存复测结果
+                        </button>
+                    )}
+                    {flaggedCount > 0 && !retesting && (
+                        <button type="button" onClick={() => void handleDeleteFlagged()} disabled={loading} className="px-3 py-1 text-xs font-medium rounded-full transition-colors disabled:opacity-50 bg-red-100 text-red-800 hover:bg-red-200 dark:bg-red-900/40 dark:text-red-300">
+                            <Trash2 className="w-3.5 h-3.5 mr-1 inline-block" />
+                            删除失效项 ({flaggedCount})
+                        </button>
+                    )}
+
+                    <div className="flex items-center gap-2 ml-auto">
+                        <button type="button" onClick={() => setShowManage(v => !v)} className="px-3 py-1 text-xs font-medium rounded-full transition-colors disabled:opacity-50 bg-indigo-100 text-indigo-800 hover:bg-indigo-200 dark:bg-indigo-900/40 dark:text-indigo-300">
+                            <Settings2 className="w-3.5 h-3.5 mr-1 inline-block" />
+                            {showManage ? '收起分组管理' : '管理分组'}
+                        </button>
+                        <button type="button" onClick={handleExportBackup} className="px-3 py-1 text-xs font-medium rounded-full transition-colors disabled:opacity-50 bg-gray-200 text-gray-800 hover:bg-gray-300 dark:bg-gray-600 dark:text-gray-200">
+                            <Download className="w-3.5 h-3.5 mr-1 inline-block" />
+                            导出备份
+                        </button>
+                        <button type="button" onClick={() => importInputRef.current?.click()} disabled={loading} className="px-3 py-1 text-xs font-medium rounded-full transition-colors disabled:opacity-50 bg-gray-200 text-gray-800 hover:bg-gray-300 dark:bg-gray-600 dark:text-gray-200">
+                            <Upload className="w-3.5 h-3.5 mr-1 inline-block" />
+                            导入备份
+                        </button>
+                        <input ref={importInputRef} type="file" accept="application/json,.json" onChange={(e) => void handleImportFile(e)} className="hidden" />
+                    </div>
+                </div>
+
+                {showManage && (
+                    <div className="p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                        <div className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">分组管理（重命名或删除；删除分组会同时删除其中所有 IP）</div>
+                        {manageNames.length === 0 ? (
+                            <div className="text-xs text-gray-400">暂无分组</div>
+                        ) : (
+                            <ul className="divide-y divide-gray-200 dark:divide-gray-600">
+                                {manageNames.map(name => {
+                                    const count = items.filter(i => i.sceneName === name).length;
+                                    const isEditing = editingScene === name;
+                                    return (
+                                        <li key={name} className="flex flex-wrap items-center gap-2 py-2">
+                                            {isEditing ? (
+                                                <>
+                                                    <input
+                                                        autoFocus
+                                                        value={editValue}
+                                                        onChange={(e) => setEditValue(e.target.value)}
+                                                        onKeyDown={(e) => {
+                                                            if (e.key === 'Enter') void submitRename(name);
+                                                            if (e.key === 'Escape') setEditingScene(null);
+                                                        }}
+                                                        maxLength={64}
+                                                        className="p-1 border rounded-md w-48 text-sm dark:bg-gray-600 dark:border-gray-500 dark:text-white"
+                                                    />
+                                                    <button type="button" onClick={() => void submitRename(name)} className="px-3 py-1 text-xs font-medium rounded-full transition-colors disabled:opacity-50 bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-900/40 dark:text-blue-300">保存</button>
+                                                    <button type="button" onClick={() => setEditingScene(null)} className="px-3 py-1 text-xs font-medium rounded-full transition-colors disabled:opacity-50 bg-gray-200 text-gray-700 hover:bg-gray-300 dark:bg-gray-600 dark:text-gray-200">取消</button>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <span className="text-sm text-gray-800 dark:text-gray-100">{name}</span>
+                                                    <span className="text-xs text-gray-400">{count} 个</span>
+                                                    <div className="flex items-center gap-2 ml-auto">
+                                                        <button type="button" onClick={() => { setEditingScene(name); setEditValue(name); }} className="px-3 py-1 text-xs font-medium rounded-full transition-colors disabled:opacity-50 bg-gray-200 text-gray-800 hover:bg-gray-300 dark:bg-gray-600 dark:text-gray-200">
+                                                            <Pencil className="w-3 h-3 mr-1 inline-block" />
+                                                            重命名
+                                                        </button>
+                                                        <button type="button" onClick={() => void handleDeleteScene(name)} className="px-3 py-1 text-xs font-medium rounded-full transition-colors disabled:opacity-50 bg-red-100 text-red-800 hover:bg-red-200 dark:bg-red-900/40 dark:text-red-300">
+                                                            <Trash2 className="w-3 h-3 mr-1 inline-block" />
+                                                            删除
+                                                        </button>
+                                                    </div>
+                                                </>
+                                            )}
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+                        )}
+                    </div>
+                )}
             </div>
 
             <div className="overflow-auto" style={{ maxHeight: '600px' }}>
@@ -312,16 +730,18 @@ export function SavedIpList() {
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">场景</th>
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">下载速度</th>
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">纯净度</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider" title="综合评分 = 延迟 40% + 下载速度 35% + 纯净度 25%（延迟 300ms、速度 100Mbps 封顶；未测项按 0 计）">评分</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">测于</th>
                         </tr>
                     </thead>
                     <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                         {loading ? (
-                            <tr><td colSpan={9} className="px-4 py-4 text-center text-gray-500">加载中...</td></tr>
+                            <tr><td colSpan={11} className="px-4 py-4 text-center text-gray-500">加载中...</td></tr>
                         ) : filteredItems.length === 0 ? (
-                            <tr><td colSpan={9} className="px-4 py-4 text-center text-gray-500">暂无数据</td></tr>
+                            <tr><td colSpan={11} className="px-4 py-4 text-center text-gray-500">暂无数据</td></tr>
                         ) : (
                             filteredItemsSorted.map((item) => (
-                                <tr key={`${item.ip}-${item.port}-${item.sceneName}`} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                                <tr key={`${item.ip}-${item.port}-${item.sceneName}`} className={`hover:bg-gray-50 dark:hover:bg-gray-700 ${retestFlags[itemId(item)] ? 'bg-red-50 dark:bg-red-900/20' : ''}`}>
                                     <td className="px-4 py-2">
                                         <input 
                                             type="checkbox"
@@ -333,6 +753,7 @@ export function SavedIpList() {
                                     <td className="px-4 py-2 whitespace-nowrap text-sm font-mono text-gray-900 dark:text-white">
                                         {item.ip}
                                         {item.domain && <span className="ml-2 px-1.5 py-0.5 text-[10px] rounded bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">域名</span>}
+                                        {retestFlags[itemId(item)] && <div className="text-[11px] font-sans font-normal text-red-600 dark:text-red-400">失效：{retestFlags[itemId(item)]}</div>}
                                     </td>
                                     <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{item.port}</td>
                                     <td className={`px-4 py-2 whitespace-nowrap text-sm font-semibold ${getLatencyColor(item.latency)}`}>
@@ -343,6 +764,8 @@ export function SavedIpList() {
                                     <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{item.sceneName}</td>
                                     <td className="px-4 py-2 whitespace-nowrap text-sm font-semibold text-blue-600 dark:text-blue-400">{typeof item.downloadMbps === 'number' && item.downloadMbps > 0 ? `${item.downloadMbps.toFixed(2)} Mbps` : '-'}</td>
                                     <td className="px-4 py-2 whitespace-nowrap text-sm font-semibold text-emerald-600 dark:text-emerald-400">{typeof item.purity?.purityScore === 'number' ? `${item.purity.purityScore}/100` : '-'}</td>
+                                    <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-700 dark:text-gray-200">{compositeScore(item).toFixed(1)}</td>
+                                    <td className={`px-4 py-2 whitespace-nowrap text-sm ${item.testedAt && Date.now() - item.testedAt > STALE_MS ? 'text-amber-600 dark:text-amber-400' : 'text-gray-500 dark:text-gray-400'}`} title={item.testedAt ? new Date(item.testedAt).toLocaleString() : '旧数据没有测试时间，重新保存或复测后会补上'}>{formatAge(item.testedAt)}</td>
                                 </tr>
                             ))
                         )}

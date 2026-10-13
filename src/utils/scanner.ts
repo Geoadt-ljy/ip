@@ -19,6 +19,7 @@ export interface ScanResult {
     downloadBytes?: number;
     downloadError?: string;
     purity?: import('../api').PurityResult;
+    testedAt?: number;     // 该条记录最近一次测试/保存的时间戳（毫秒），供订阅接口按新鲜度过滤
 }
 
 /**
@@ -155,7 +156,7 @@ function orderedTestDomains(): string[] {
  * 该路径依赖浏览器对测速域名的 DNS 解析，解析不通即自然返回失败，
  * 从而引导用户改用更可靠的「本地 Agent 测速」。
  */
-async function testIpLatency(ip: string, port: number, timeout: number): Promise<Omit<ScanResult, 'isAvailable' | 'ip' | 'port'>> {
+export async function testIpLatency(ip: string, port: number, timeout: number): Promise<Omit<ScanResult, 'isAvailable' | 'ip' | 'port'>> {
     const hexIp = ipToHex(ip);
     const candidates = isIPv6(ip)
         ? [null]

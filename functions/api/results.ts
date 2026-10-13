@@ -121,3 +121,37 @@ export const onRequestDelete: PagesFunction<Env> = async (context) => {
     return new Response(JSON.stringify({ message: (err as Error).message }), { status: 500, headers: { 'Content-Type': 'application/json' } });
   }
 };
+
+// 重命名分组（场景）：PATCH /api/results  body: { from, to }
+// 目标名称已存在时返回 409，避免意外覆盖已有分组的数据。
+export const onRequestPatch: PagesFunction<Env> = async (context) => {
+  const { request, env } = context;
+  try {
+    const body = await request.json() as { from?: unknown; to?: unknown };
+    const from = typeof body.from === 'string' ? body.from : '';
+    const to = typeof body.to === 'string' ? body.to.trim() : '';
+
+    if (!validSceneName(from) || !validSceneName(to)) {
+      return badRequest(`分组名无效（不能为空，最长 ${SCENE_NAME_MAX} 个字符，不能含控制字符）`);
+    }
+    if (from === to) {
+      return badRequest('新名称与原名称相同');
+    }
+
+    const raw = await env.IP_KV.get(`scene:${from}`);
+    if (raw === null) {
+      return new Response(JSON.stringify({ message: '原分组不存在' }), { status: 404, headers: { 'Content-Type': 'application/json' } });
+    }
+    if ((await env.IP_KV.get(`scene:${to}`)) !== null) {
+      return new Response(JSON.stringify({ message: `分组「${to}」已存在，请换一个名称` }), { status: 409, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    // 先写入新名称，成功后再删除旧名称，中途失败也不会丢数据
+    await env.IP_KV.put(`scene:${to}`, raw);
+    await env.IP_KV.delete(`scene:${from}`);
+
+    return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
+  } catch (err) {
+    return new Response(JSON.stringify({ message: (err as Error).message }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  }
+};

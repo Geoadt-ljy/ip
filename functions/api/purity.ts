@@ -51,9 +51,18 @@ function validIp(value: string): boolean {
   return validIpv4(value) || validIpv6(value);
 }
 
-export const onRequestPost: PagesFunction = async ({ request }) => {
+interface Env {
+  IP_KV?: KVNamespace;
+}
+
+// 纯净度结果缓存 24 小时（存放在已有的 IP_KV，key 前缀 purity:）。
+// 注意：每个新查询的 IP 会写一次 KV，免费版 KV 每天约 1000 次写入额度；
+// 请求体里传 refresh: true 可忽略缓存并重新查询。
+const CACHE_TTL_SECONDS = 24 * 3600;
+
+export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   try {
-    const body = await request.json() as { ips?: string[] };
+    const body = await request.json() as { ips?: string[]; refresh?: boolean };
     const ips = Array.from(new Set((body.ips || [])
       .map(x => String(x).trim())
       .filter(validIp)))
@@ -72,6 +81,16 @@ export const onRequestPost: PagesFunction = async ({ request }) => {
     const results: Record<string, unknown> = {};
     for (const ip of ips) {
       try {
+        if (!body.refresh && env.IP_KV) {
+          try {
+            const cached = await env.IP_KV.get(`purity:${ip}`, { type: 'json' });
+            if (cached && typeof cached === 'object') {
+              results[ip] = cached;
+              continue;
+            }
+          } catch { /* 缓存读取失败时直接走上游查询 */ }
+        }
+
         const upstream = await fetch(`https://api.ffraud.com/public/ip/${encodeURIComponent(ip)}`, {
           headers: { 'Accept': 'application/json' },
         });
@@ -107,6 +126,11 @@ export const onRequestPost: PagesFunction = async ({ request }) => {
           threatTags: Array.isArray(data.threat_tags) ? data.threat_tags : [],
           confidence: data.confidence || '',
         };
+        if (env.IP_KV) {
+          try {
+            await env.IP_KV.put(`purity:${ip}`, JSON.stringify(results[ip]), { expirationTtl: CACHE_TTL_SECONDS });
+          } catch { /* 缓存写入失败（如额度用尽）不影响本次结果 */ }
+        }
       } catch {
         // A failed upstream lookup only skips this IP; it must not abort the batch.
         continue;

@@ -137,7 +137,7 @@ function App() {
           <ThirdPartySource />
           
           <ScannerConfig cfIps={cfIps} onScanComplete={setScanResults} />
-          <ScannerResults scanResults={scanResults} onSaveSuccess={() => setRefreshKey(k => k + 1)} />
+          <ScannerResults scanResults={scanResults} onSaveSuccess={() => setRefreshKey(k => k + 1)} onScenesChanged={() => setRefreshKey(k => k + 1)} />
 
           <SavedIpList key={refreshKey} />
 

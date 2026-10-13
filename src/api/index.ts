@@ -277,13 +277,29 @@ export interface PurityResult {
     confidence: string;
 }
 
-export async function checkPurity(ips: string[], signal?: AbortSignal): Promise<Record<string, PurityResult>> {
+export async function checkPurity(ips: string[], signal?: AbortSignal, refresh = false): Promise<Record<string, PurityResult>> {
     const response = await authedFetch('/api/purity', {
         method: 'POST',
         signal,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ips }),
+        body: JSON.stringify({ ips, refresh }),
     });
     const data = await handleResponse<{ results: Record<string, PurityResult> }>(response);
     return data?.results || {};
+}
+
+/** 删除整个分组（场景）及其中所有 IP */
+export async function deleteScene(name: string): Promise<void> {
+    const response = await authedFetch(`/api/results?scene=${encodeURIComponent(name)}`, { method: 'DELETE' });
+    return handleResponse<void>(response);
+}
+
+/** 重命名分组（场景）；目标名称已存在时服务端返回 409 并给出提示 */
+export async function renameScene(from: string, to: string): Promise<void> {
+    const response = await authedFetch('/api/results', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from, to }),
+    });
+    return handleResponse<void>(response);
 }

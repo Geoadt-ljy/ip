@@ -1,5 +1,5 @@
 import { Fragment, useState, useEffect, useRef } from 'react';
-import { saveResults, getScenes, checkPurity } from '../api';
+import { saveResults, getScenes, checkPurity, deleteScene } from '../api';
 import {
   ScanResult,
   getLatencyColor,
@@ -7,17 +7,20 @@ import {
   testBrowserPacketLoss,
 } from '../utils/scanner';
 import { useToast } from './Toast';
-import { ListFilter, Save, ChevronDown, ChevronUp } from 'lucide-react';
+import { useConfirm } from './ConfirmDialog';
+import { ListFilter, Save, ChevronDown, ChevronUp, X } from 'lucide-react';
 import { RegionDisplay } from './RegionDisplay';
 
 interface IpScannerResultsAndSaveProps {
     scanResults: ScanResult[];
     onSaveSuccess?: () => void;
+    onScenesChanged?: () => void; // 删除分组后通知上层刷新已保存列表
 }
 
 const DEFAULT_IPS_PER_REGION = 20;
 
-export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsAndSaveProps) {
+export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: IpScannerResultsAndSaveProps) {
+    const [purityForceRefresh, setPurityForceRefresh] = useState(false);
     const [ipsPerRegion, setIpsPerRegion] = useState<string>(String(DEFAULT_IPS_PER_REGION));
     const [isLatencyFilterEnabled, setIsLatencyFilterEnabled] = useState(false);
     const [isDownloadFilterEnabled, setIsDownloadFilterEnabled] = useState(false);
@@ -121,6 +124,30 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
         return () => document.removeEventListener('mousedown', handler);
     }, [sceneDropdownOpen]);
 
+    // 每次展开下拉都重新读取分组列表，这样在“已保存列表”里重命名/删除分组后这里也是最新的
+    useEffect(() => {
+        if (!sceneDropdownOpen) return;
+        let cancelled = false;
+        getScenes()
+            .then((data) => { if (!cancelled) setScenes(data.map((s) => s.name)); })
+            .catch(() => { /* 加载失败不影响录入 */ });
+        return () => { cancelled = true; };
+    }, [sceneDropdownOpen]);
+
+    const handleDeleteScene = async (name: string) => {
+        const ok = await confirm(`确定要删除分组「${name}」及其中所有 IP/域名吗？此操作不可恢复。`, { confirmText: '确定删除' });
+        if (!ok) return;
+        try {
+            await deleteScene(name);
+            setScenes((prev) => prev.filter((n) => n !== name));
+            if (sceneName === name) setSceneName('');
+            showToast(`已删除分组「${name}」`, 'success');
+            if (onScenesChanged) onScenesChanged();
+        } catch (error) {
+            showToast(`删除失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+        }
+    };
+
     // 已保存场景列表，不进行过滤，全部展示为标签
     const sceneOptions = scenes;
 
@@ -218,6 +245,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
     const allVisibleSpeedSelected = filteredResults.filter(r => !r.domain).length > 0 && selectedVisibleSpeedKeys.length === filteredResults.filter(r => !r.domain).length;
 
     const { showToast } = useToast();
+    const { confirm } = useConfirm();
 
     const toggleSpeedTarget = (key: string) => {
         setSelectedSpeedTargets(prev => {
@@ -376,7 +404,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                     const batch = batches.shift();
                     if (!batch) return;
                     try {
-                        const data = await checkPurity(batch, signal);
+                        const data = await checkPurity(batch, signal, purityForceRefresh);
                         okCount += Object.keys(data).length;
                         setPurityMap(prev => ({ ...prev, ...data }));
                         const missing = batch.filter(ip => !data[ip]);
@@ -444,6 +472,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                 const measuredPurity = purityMap[result.ip] || result.purity;
                 return {
                     ...rest,
+                    testedAt: Date.now(), // 记录本次测试/保存时间，订阅接口可用 max_age 过滤过旧数据
                     ...(typeof measuredSpeed === 'number' && measuredSpeed > 0 ? { downloadMbps: measuredSpeed } : {}),
                     ...(measuredPurity ? { purity: measuredPurity } : {}),
                 };
@@ -473,6 +502,10 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                             <div className="flex items-center gap-4 flex-wrap">
                                 <h3 className="text-sm font-bold text-gray-700 dark:text-gray-200">筛选与操作（勾选项共用于测速、纯净度检测和 KV 保存）:</h3>
                                 <button onClick={() => void handlePurity()} disabled={isCheckingPurity || selectedVisibleSpeedKeys.length === 0} className="px-3 py-1 text-xs font-medium rounded-full bg-emerald-100 text-emerald-700 hover:bg-emerald-200 disabled:opacity-50 dark:bg-emerald-900/40 dark:text-emerald-300">{isCheckingPurity ? `检测中 ${purityDone}/${purityTotal}` : `检测勾选项纯净度 (${selectedVisibleSpeedKeys.length})`}</button>
+                                <label className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 cursor-pointer select-none" title="默认复用 24 小时内的检测结果，勾选后重新向上游查询">
+                                    <input type="checkbox" checked={purityForceRefresh} onChange={(e) => setPurityForceRefresh(e.target.checked)} disabled={isCheckingPurity} className="h-3.5 w-3.5 rounded border-gray-300 text-emerald-600" />
+                                    忽略缓存
+                                </label>
                                 <button onClick={() => void handleBrowserSpeedTest()} disabled={isBrowserSpeedTesting || selectedVisibleSpeedKeys.length === 0} className="px-3 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-700 hover:bg-blue-200 disabled:opacity-50 dark:bg-blue-900/40 dark:text-blue-300">{isBrowserSpeedTesting ? `测速中 ${browserSpeedDone}/${browserSpeedTotal}` : `浏览器测速 (${selectedVisibleSpeedKeys.length})`}</button>
                                 <button onClick={() => void handleCombinedSpeedPurityTest()} disabled={isBrowserSpeedTesting || isCheckingPurity || selectedVisibleSpeedKeys.length === 0} className="px-3 py-1 text-xs font-medium rounded-full bg-violet-100 text-violet-700 hover:bg-violet-200 disabled:opacity-50 dark:bg-violet-900/40 dark:text-violet-300">一键测速 + 纯净度</button>
                                 {isBrowserSpeedTesting && (
@@ -836,14 +869,27 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                                     {sceneOptions.length > 0 ? (
                                         <div className="flex flex-wrap gap-1.5">
                                             {sceneOptions.map((name) => (
-                                                <button
+                                                <span
                                                     key={name}
-                                                    type="button"
-                                                    onClick={() => { setSceneName(name); setSceneDropdownOpen(false); }}
-                                                    className="px-2.5 py-1 text-xs font-medium rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 hover:border-indigo-300 dark:bg-indigo-900/40 dark:text-indigo-200 dark:border-indigo-700/60 dark:hover:bg-indigo-800/60 transition-colors"
+                                                    className="inline-flex items-center rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 dark:bg-indigo-900/40 dark:text-indigo-200 dark:border-indigo-700/60 overflow-hidden"
                                                 >
-                                                    {name}
-                                                </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => { setSceneName(name); setSceneDropdownOpen(false); }}
+                                                        className="pl-2.5 pr-1.5 py-1 text-xs font-medium hover:bg-indigo-100 dark:hover:bg-indigo-800/60 transition-colors"
+                                                    >
+                                                        {name}
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        title={`删除分组「${name}」`}
+                                                        aria-label={`删除分组 ${name}`}
+                                                        onClick={() => void handleDeleteScene(name)}
+                                                        className="px-1.5 py-1 text-indigo-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/40 transition-colors"
+                                                    >
+                                                        <X className="w-3 h-3" />
+                                                    </button>
+                                                </span>
                                             ))}
                                         </div>
                                     ) : (

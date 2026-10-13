@@ -40,13 +40,18 @@ export function ApiDocs({ apiToken }: ApiDocsProps) {
                 <li><code>scene=场景名称</code>: 按场景名称筛选，例如 <code>scene=家庭电信</code></li>
                 <li><code>latency=毫秒数</code>: 筛选延迟小于等于指定值的IP，例如 <code>latency=200</code></li>
                 <li><code>region=地区代码</code>: 按Cloudflare地区代码筛选 (例如: LAX, SJC)，不区分大小写。例如 <code>region=SJC</code></li>
-                <li><code>count=数量</code>: 返回指定数量的IP（按延迟排序），例如 <code>count=10</code></li>
+                <li><code>count=数量</code>: 返回指定数量的IP（按排序结果取前 N 个），例如 <code>count=10</code></li>
+                <li><code>min_speed=Mbps</code>: 只要下载速度不低于该值的IP（未测速的不返回），例如 <code>min_speed=30</code></li>
+                <li><code>min_purity=0-100</code>: 只要纯净度不低于该值的IP（未检测的不返回），例如 <code>min_purity=90</code></li>
+                <li><code>max_age=时长</code>: 只要最近测试过的IP，数字默认为小时，支持 <code>h</code>/<code>d</code> 后缀，例如 <code>max_age=24h</code>、<code>max_age=7d</code>（没有测试时间的旧数据不返回，重新保存或复测后会补上）</li>
+                <li><code>sort=排序方式</code>: <code>latency</code>（默认）、<code>speed</code>、<code>purity</code>、<code>score</code>（综合评分：延迟 40% + 下载速度 35% + 纯净度 25%，未测项按 0 计）</li>
+                <li><code>format=simple</code>: 精简输出，只保留 <code>IP:端口#地区|场景|延迟ms</code>，不追加速度和纯净度字段</li>
             </ul>
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">
                 示例:
             </p>
             <div className="text-sm text-gray-500 dark:text-gray-400 mb-2">
-                    {`${window.location.origin}/api/getips?token=${apiToken || 'TOKEN'}&scene=家庭电信&latency=200&region=SJC&count=10`}
+                    {`${window.location.origin}/api/getips?token=${apiToken || 'TOKEN'}&scene=家庭电信&latency=200&region=SJC&min_speed=30&min_purity=90&sort=score&count=10`}
             </div>
         </div>
     );
