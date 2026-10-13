@@ -19,19 +19,15 @@ const DEFAULT_IPS_PER_REGION = 20;
 
 export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsAndSaveProps) {
     const [ipsPerRegion, setIpsPerRegion] = useState<string>(String(DEFAULT_IPS_PER_REGION));
-    const [ipsPerRegionError, setIpsPerRegionError] = useState<string>('');
     const [isLatencyFilterEnabled, setIsLatencyFilterEnabled] = useState(false);
     const [isDownloadFilterEnabled, setIsDownloadFilterEnabled] = useState(false);
     const [downloadFilterValue, setDownloadFilterValue] = useState<string>('10');
-    const [downloadFilterError, setDownloadFilterError] = useState<string>('');
     const [isPurityFilterEnabled, setIsPurityFilterEnabled] = useState(false);
     const [purityFilterValue, setPurityFilterValue] = useState<string>('90');
-    const [purityFilterError, setPurityFilterError] = useState<string>('');
     const [isPacketLossFilterEnabled, setIsPacketLossFilterEnabled] = useState(false);
     const [packetLossFilterValue, setPacketLossFilterValue] = useState<string>('10');
     const [isRegionLimitEnabled, setIsRegionLimitEnabled] = useState(false);
     const [latencyFilterValue, setLatencyFilterValue] = useState<string>('300');
-    const [latencyFilterError, setLatencyFilterError] = useState<string>('');
     const [isSaving, setIsSaving] = useState(false);
     const [sceneName, setSceneName] = useState('');
     const [scenes, setScenes] = useState<string[]>([]);
@@ -148,8 +144,14 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
     const isIpsPerRegionFormatValid = /^\d+$/.test(ipsPerRegionTrim) && parseInt(ipsPerRegionTrim, 10) >= 1;
     const effectiveIpsPerRegion = isIpsPerRegionFormatValid ? parseInt(ipsPerRegionTrim, 10) : DEFAULT_IPS_PER_REGION;
 
-    const baseFilteredResults = scanResults.filter(r => isLatencyFilterEnabled
-        ? (isLatencyFormatValid && r.latency > -1 && r.latency <= effectiveLatencyValue)
+    // 勾选且数值合法才生效；数值不合法时不做筛选，仅在输入框旁提示，避免误把结果全部过滤掉
+    const latencyFilterActive = isLatencyFilterEnabled && isLatencyFormatValid;
+    const downloadFilterActive = isDownloadFilterEnabled && isDownloadFormatValid;
+    const purityFilterActive = isPurityFilterEnabled && isPurityFormatValid;
+    const regionLimitActive = isRegionLimitEnabled && isIpsPerRegionFormatValid;
+
+    const baseFilteredResults = scanResults.filter(r => latencyFilterActive
+        ? (r.latency > -1 && r.latency <= effectiveLatencyValue)
         : true
     );
 
@@ -185,11 +187,11 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
     };
 
     const downloadFilteredResults = regionFilteredResults.filter(r =>
-        isDownloadFilterEnabled ? (displayDownloadMbps(r) > 0 && displayDownloadMbps(r) >= effectiveDownloadValue) : true
+        downloadFilterActive ? (displayDownloadMbps(r) > 0 && displayDownloadMbps(r) >= effectiveDownloadValue) : true
     );
 
     const purityFilteredResults = downloadFilteredResults.filter(r =>
-        isPurityFilterEnabled ? (purityMap[r.ip] && purityMap[r.ip].purityScore >= effectivePurityValue) : true
+        purityFilterActive ? (purityMap[r.ip] && purityMap[r.ip].purityScore >= effectivePurityValue) : true
     );
 
     const packetLossFilteredResults = purityFilteredResults.filter(r => {
@@ -200,7 +202,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
     });
 
     let limitedResults = [...packetLossFilteredResults];
-    if (isRegionLimitEnabled) {
+    if (regionLimitActive) {
         const regionCountsForLimit: { [key: string]: number } = {};
         limitedResults = packetLossFilteredResults.filter(r => {
             const colo = r.colo || 'Unknown';
@@ -501,14 +503,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                                         id="latency-filter-enable"
                                         type="checkbox"
                                         checked={isLatencyFilterEnabled}
-                                        onChange={(e) => {
-                                            if (e.target.checked && !isLatencyFormatValid) {
-                                                setLatencyFilterError('请输入有效的正整数');
-                                                return;
-                                            }
-                                            setLatencyFilterError('');
-                                            setIsLatencyFilterEnabled(e.target.checked);
-                                        }}
+                                        onChange={(e) => setIsLatencyFilterEnabled(e.target.checked)}
                                         className="h-4 w-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
                                     />
                                     <label htmlFor="latency-filter-enable" className="text-sm text-gray-600 dark:text-gray-300 cursor-pointer select-none">延迟 ≤</label>
@@ -518,26 +513,18 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                                         id="latency-filter-value"
                                         type="text"
                                         value={latencyFilterValue}
-                                        onChange={(e) => { setLatencyFilterValue(e.target.value); if (latencyFilterError) setLatencyFilterError(''); }}
-                                        className="p-1 border rounded-md w-20 text-sm dark:bg-gray-600 dark:border-gray-500 dark:text-white disabled:bg-gray-200 dark:disabled:bg-gray-800"
-                                        disabled={!isLatencyFilterEnabled}
+                                        onChange={(e) => setLatencyFilterValue(e.target.value)}
+                                        className={`p-1 border rounded-md w-20 text-sm dark:bg-gray-600 dark:border-gray-500 dark:text-white ${isLatencyFilterEnabled ? '' : 'opacity-60'}`}
                                     />
                                     <span className="text-sm text-gray-600 dark:text-gray-300">ms</span>
-                                    {latencyFilterError && <span className="text-red-500 text-xs">{latencyFilterError}</span>}
+                                    {isLatencyFilterEnabled && !isLatencyFormatValid && <span className="text-red-500 text-xs">请输入有效的正整数</span>}
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <input
                                         id="download-filter-enable"
                                         type="checkbox"
                                         checked={isDownloadFilterEnabled}
-                                        onChange={(e) => {
-                                            if (e.target.checked && !isDownloadFormatValid) {
-                                                setDownloadFilterError('请输入有效的速度值');
-                                                return;
-                                            }
-                                            setDownloadFilterError('');
-                                            setIsDownloadFilterEnabled(e.target.checked);
-                                        }}
+                                        onChange={(e) => setIsDownloadFilterEnabled(e.target.checked)}
                                         className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                                     />
                                     <label htmlFor="download-filter-enable" className="text-sm text-gray-600 dark:text-gray-300 cursor-pointer select-none">下载速度 ≥</label>
@@ -546,26 +533,18 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                                         type="text"
                                         inputMode="decimal"
                                         value={downloadFilterValue}
-                                        onChange={(e) => { setDownloadFilterValue(e.target.value.replace(/[^0-9.]/g, '')); if (downloadFilterError) setDownloadFilterError(''); }}
-                                        className="p-1 border rounded-md w-20 text-sm dark:bg-gray-600 dark:border-gray-500 dark:text-white disabled:bg-gray-200 dark:disabled:bg-gray-800"
-                                        disabled={!isDownloadFilterEnabled}
+                                        onChange={(e) => setDownloadFilterValue(e.target.value.replace(/[^0-9.]/g, ''))}
+                                        className={`p-1 border rounded-md w-20 text-sm dark:bg-gray-600 dark:border-gray-500 dark:text-white ${isDownloadFilterEnabled ? '' : 'opacity-60'}`}
                                     />
                                     <span className="text-sm text-gray-600 dark:text-gray-300">Mbps</span>
-                                    {downloadFilterError && <span className="text-red-500 text-xs">{downloadFilterError}</span>}
+                                    {isDownloadFilterEnabled && !isDownloadFormatValid && <span className="text-red-500 text-xs">请输入有效的速度值</span>}
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <input
                                         id="purity-filter-enable"
                                         type="checkbox"
                                         checked={isPurityFilterEnabled}
-                                        onChange={(e) => {
-                                            if (e.target.checked && !isPurityFormatValid) {
-                                                setPurityFilterError('请输入 0-100 的纯净度');
-                                                return;
-                                            }
-                                            setPurityFilterError('');
-                                            setIsPurityFilterEnabled(e.target.checked);
-                                        }}
+                                        onChange={(e) => setIsPurityFilterEnabled(e.target.checked)}
                                         className="h-4 w-4 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
                                     />
                                     <label htmlFor="purity-filter-enable" className="text-sm text-gray-600 dark:text-gray-300 cursor-pointer select-none">纯净度 ≥</label>
@@ -574,12 +553,11 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                                         type="text"
                                         inputMode="numeric"
                                         value={purityFilterValue}
-                                        onChange={(e) => { setPurityFilterValue(e.target.value.replace(/[^0-9]/g, '').slice(0, 3)); if (purityFilterError) setPurityFilterError(''); }}
-                                        className="p-1 border rounded-md w-16 text-sm dark:bg-gray-600 dark:border-gray-500 dark:text-white disabled:bg-gray-200 dark:disabled:bg-gray-800"
-                                        disabled={!isPurityFilterEnabled}
+                                        onChange={(e) => setPurityFilterValue(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
+                                        className={`p-1 border rounded-md w-16 text-sm dark:bg-gray-600 dark:border-gray-500 dark:text-white ${isPurityFilterEnabled ? '' : 'opacity-60'}`}
                                     />
                                     <span className="text-sm text-gray-600 dark:text-gray-300">/100</span>
-                                    {purityFilterError && <span className="text-red-500 text-xs">{purityFilterError}</span>}
+                                    {isPurityFilterEnabled && !isPurityFormatValid && <span className="text-red-500 text-xs">请输入 0-100 的纯净度</span>}
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <input
@@ -596,8 +574,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                                         inputMode="decimal"
                                         value={packetLossFilterValue}
                                         onChange={(e) => setPacketLossFilterValue(e.target.value.replace(/[^0-9.]/g, '').slice(0, 5))}
-                                        className="p-1 border rounded-md w-16 text-sm dark:bg-gray-600 dark:border-gray-500 dark:text-white disabled:bg-gray-200 dark:disabled:bg-gray-800"
-                                        disabled={!isPacketLossFilterEnabled}
+                                        className={`p-1 border rounded-md w-16 text-sm dark:bg-gray-600 dark:border-gray-500 dark:text-white ${isPacketLossFilterEnabled ? '' : 'opacity-60'}`}
                                     />
                                     <span className="text-sm text-gray-600 dark:text-gray-300">%</span>
                                     {isPacketLossFilterEnabled && !isPacketLossFormatValid && <span className="text-red-500 text-xs">请输入 0-100</span>}
@@ -607,14 +584,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                                         id="region-limit-enable"
                                         type="checkbox"
                                         checked={isRegionLimitEnabled}
-                                        onChange={(e) => {
-                                            if (e.target.checked && !isIpsPerRegionFormatValid) {
-                                                setIpsPerRegionError('请输入大于等于1的整数');
-                                                return;
-                                            }
-                                            setIpsPerRegionError('');
-                                            setIsRegionLimitEnabled(e.target.checked);
-                                        }}
+                                        onChange={(e) => setIsRegionLimitEnabled(e.target.checked)}
                                         className="h-4 w-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
                                     />
                                     <label htmlFor="region-limit-enable" className="text-sm text-gray-600 dark:text-gray-300 cursor-pointer select-none">每个地区保留</label>
@@ -624,12 +594,11 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                                         id="ips-per-region"
                                         type="text"
                                         value={ipsPerRegion}
-                                        onChange={(e) => { setIpsPerRegion(e.target.value); if (ipsPerRegionError) setIpsPerRegionError(''); }}
-                                        className="p-1 border rounded-md w-20 text-sm dark:bg-gray-600 dark:border-gray-500 dark:text-white disabled:bg-gray-200 dark:disabled:bg-gray-800"
-                                        disabled={!isRegionLimitEnabled}
+                                        onChange={(e) => setIpsPerRegion(e.target.value)}
+                                        className={`p-1 border rounded-md w-20 text-sm dark:bg-gray-600 dark:border-gray-500 dark:text-white ${isRegionLimitEnabled ? '' : 'opacity-60'}`}
                                     />
                                     <span className="text-sm text-gray-600 dark:text-gray-300">个</span>
-                                    {ipsPerRegionError && <span className="text-red-500 text-xs">{ipsPerRegionError}</span>}
+                                    {isRegionLimitEnabled && !isIpsPerRegionFormatValid && <span className="text-red-500 text-xs">请输入大于等于1的整数</span>}
                                 </div>
                             </div>
                         </div>
@@ -661,7 +630,7 @@ export function ScannerResults({ scanResults, onSaveSuccess }: IpScannerResultsA
                         <div className="flex flex-wrap gap-2">
                             {uniqueRegions.map(region => {
                                 const countForRegion = regionCounts[region] || 0;
-                                const displayCount = isRegionLimitEnabled ? Math.min(countForRegion, effectiveIpsPerRegion) : countForRegion;
+                                const displayCount = regionLimitActive ? Math.min(countForRegion, effectiveIpsPerRegion) : countForRegion;
                                 const isSelected = selectedRegions.has(region);
                                 return (
                                     <button
