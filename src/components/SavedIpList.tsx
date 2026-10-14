@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, ChangeEvent } from 'react';
 import { getScenes, getSceneResults, saveResults, deleteScene, renameScene } from '../api';
 import { getLatencyColor, ScanResult, testIpLatency, testBrowserDownloadSpeed, resolveDomainToIp } from '../utils/scanner';
-import { compositeScore } from '../../functions/_lib/score';
+import { compositeScore, normalizeWeights } from '../../functions/_lib/score';
+import { classifyHome } from '../../functions/_lib/residential';
 import { getColoName } from '../utils/colo';
 import { useToast } from './Toast';
 import { useConfirm } from './ConfirmDialog'; // Import Trash2 and RotateCw
@@ -16,7 +17,18 @@ interface SavedIpData {
     colo?: string;
     domain?: boolean; // 是否为域名源
     downloadMbps?: number;
-    purity?: { purityScore?: number; purityLabel?: string };
+    purity?: {
+        purityScore?: number;
+        purityLabel?: string;
+        // 保存时带上的纯净度详情，用于家宽判定
+        connectionType?: string;
+        isDatacenter?: boolean;
+        vpn?: boolean;
+        proxy?: boolean;
+        tor?: boolean;
+        relay?: boolean;
+        mobile?: boolean;
+    };
     testedAt?: number; // 最近一次测试/保存时间（毫秒时间戳），旧数据没有该字段
 }
 interface FlatIpItem extends SavedIpData {
@@ -24,6 +36,22 @@ interface FlatIpItem extends SavedIpData {
 }
 
 type SortKey = 'latency' | 'speed' | 'purity' | 'score' | 'recent';
+
+// 综合评分权重（百分比数字），保存在浏览器本地；订阅接口用 w_latency / w_speed / w_purity 传入
+const WEIGHTS_KEY = 'score_weights';
+type WeightInputs = { latency: string; speed: string; purity: string };
+const DEFAULT_WEIGHT_INPUTS: WeightInputs = { latency: '40', speed: '35', purity: '25' };
+const loadWeightInputs = (): WeightInputs => {
+    try {
+        const raw = localStorage.getItem(WEIGHTS_KEY);
+        if (!raw) return DEFAULT_WEIGHT_INPUTS;
+        const p = JSON.parse(raw) as Partial<WeightInputs>;
+        const pick = (v: unknown, d: string) => (typeof v === 'string' && /^\d*\.?\d*$/.test(v) ? v : d);
+        return { latency: pick(p.latency, '40'), speed: pick(p.speed, '35'), purity: pick(p.purity, '25') };
+    } catch {
+        return DEFAULT_WEIGHT_INPUTS;
+    }
+};
 
 const itemId = (i: FlatIpItem) => `${i.ip}:${i.port}#${i.sceneName}`;
 
@@ -55,6 +83,19 @@ export function SavedIpList() {
 
     const [sceneList, setSceneList] = useState<string[]>([]); // 全部分组（包含没有 IP 的空分组）
     const [sortKey, setSortKey] = useState<SortKey>('latency');
+    const [homeOnly, setHomeOnly] = useState(false); // 仅家宽（含疑似），需要保存时带有纯净度数据
+    const [showWeights, setShowWeights] = useState(false);
+    const [weightInputs, setWeightInputs] = useState<WeightInputs>(loadWeightInputs);
+    useEffect(() => {
+        try { localStorage.setItem(WEIGHTS_KEY, JSON.stringify(weightInputs)); } catch { /* ignore */ }
+    }, [weightInputs]);
+    const scoreWeights = normalizeWeights({
+        latency: Number(weightInputs.latency),
+        speed: Number(weightInputs.speed),
+        purity: Number(weightInputs.purity),
+    });
+    const weightPct = (n: number) => Math.round(n * 1000) / 10;
+    const apiWeightParams = `w_latency=${Number(weightInputs.latency) || 0}&w_speed=${Number(weightInputs.speed) || 0}&w_purity=${Number(weightInputs.purity) || 0}`;
     const [showManage, setShowManage] = useState(false);
     const [editingScene, setEditingScene] = useState<string | null>(null);
     const [editValue, setEditValue] = useState('');
@@ -107,14 +148,15 @@ export function SavedIpList() {
     }, []);
 
     const uniqueScenes = Array.from(new Set(items.map(i => i.sceneName))).sort();
-    const filteredItems = items.filter(i => selectedScenes.has(i.sceneName));
+    const filteredItems = items.filter(i => selectedScenes.has(i.sceneName)
+        && (!homeOnly || (!!i.purity && classifyHome(i.purity) !== 'other')));
     const latencyOrder = (v: number) => (v > 0 ? v : Number.MAX_SAFE_INTEGER); // 延迟失败（-1）的排最后
     const filteredItemsSorted = [...filteredItems].sort((a, b) => {
         const byLatency = latencyOrder(a.latency) - latencyOrder(b.latency);
         switch (sortKey) {
             case 'speed': return (b.downloadMbps || 0) - (a.downloadMbps || 0) || byLatency;
             case 'purity': return (b.purity?.purityScore ?? -1) - (a.purity?.purityScore ?? -1) || byLatency;
-            case 'score': return compositeScore(b) - compositeScore(a) || byLatency;
+            case 'score': return compositeScore(b, scoreWeights) - compositeScore(a, scoreWeights) || byLatency;
             case 'recent': return (b.testedAt || 0) - (a.testedAt || 0) || byLatency;
             default: return byLatency;
         }
@@ -605,6 +647,14 @@ export function SavedIpList() {
                         </select>
                     </label>
 
+                    <label className="flex items-center gap-1 text-xs text-gray-700 dark:text-gray-300 cursor-pointer select-none" title="根据保存时的纯净度数据判断：排除机房、VPN、代理、Tor、中继和移动网络；没有纯净度数据的不显示">
+                        <input type="checkbox" checked={homeOnly} onChange={(e) => setHomeOnly(e.target.checked)} className="h-3.5 w-3.5 rounded border-gray-300 text-emerald-600" />
+                        仅家宽
+                    </label>
+                    <button type="button" onClick={() => setShowWeights(v => !v)} className="px-3 py-1 text-xs font-medium rounded-full transition-colors disabled:opacity-50 bg-purple-100 text-purple-800 hover:bg-purple-200 dark:bg-purple-900/40 dark:text-purple-300">
+                        {showWeights ? '收起评分权重' : '评分权重'}
+                    </button>
+
                     <span className="hidden sm:block w-px h-5 bg-gray-300 dark:bg-gray-500" />
 
                     <button
@@ -656,6 +706,50 @@ export function SavedIpList() {
                         <input ref={importInputRef} type="file" accept="application/json,.json" onChange={(e) => void handleImportFile(e)} className="hidden" />
                     </div>
                 </div>
+
+                {showWeights && (
+                    <div className="p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                        <div className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">综合评分权重（任意非负数，会自动换算成百分比；保存在本浏览器）</div>
+                        <div className="flex flex-wrap items-center gap-3">
+                            {([
+                                ['latency', '延迟'],
+                                ['speed', '下载速度'],
+                                ['purity', '纯净度'],
+                            ] as const).map(([key, label]) => (
+                                <label key={key} className="flex items-center gap-1.5 text-sm text-gray-700 dark:text-gray-300">
+                                    {label}
+                                    <input
+                                        type="text"
+                                        inputMode="decimal"
+                                        value={weightInputs[key]}
+                                        onChange={(e) => setWeightInputs(prev => ({ ...prev, [key]: e.target.value.replace(/[^0-9.]/g, '').slice(0, 6) }))}
+                                        className="p-1 border rounded-md w-16 text-sm dark:bg-gray-600 dark:border-gray-500 dark:text-white"
+                                    />
+                                </label>
+                            ))}
+                            <button type="button" onClick={() => setWeightInputs(DEFAULT_WEIGHT_INPUTS)} className="px-3 py-1 text-xs font-medium rounded-full bg-gray-200 text-gray-800 hover:bg-gray-300 dark:bg-gray-600 dark:text-gray-200">恢复默认</button>
+                        </div>
+                        <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                            实际占比：延迟 {weightPct(scoreWeights.latency)}% · 下载速度 {weightPct(scoreWeights.speed)}% · 纯净度 {weightPct(scoreWeights.purity)}%
+                            {Number(weightInputs.latency) + Number(weightInputs.speed) + Number(weightInputs.purity) <= 0 && <span className="text-amber-600 dark:text-amber-400">（三项都为 0，已按默认权重计算）</span>}
+                        </div>
+                        <div className="mt-2 text-xs text-gray-500 dark:text-gray-400 break-all">
+                            订阅接口使用同样的权重：<code className="break-all">sort=score&amp;{apiWeightParams}</code>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    const text = `sort=score&${apiWeightParams}`;
+                                    navigator.clipboard?.writeText(text)
+                                        .then(() => showToast('已复制权重参数', 'success'))
+                                        .catch(() => showToast(`复制失败，请手动复制：${text}`, 'warning'));
+                                }}
+                                className="ml-2 px-2 py-0.5 text-xs rounded bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-900/40 dark:text-blue-300"
+                            >
+                                复制
+                            </button>
+                        </div>
+                    </div>
+                )}
 
                 {showManage && (
                     <div className="p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
@@ -730,7 +824,7 @@ export function SavedIpList() {
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">场景</th>
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">下载速度</th>
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">纯净度</th>
-                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider" title="综合评分 = 延迟 40% + 下载速度 35% + 纯净度 25%（延迟 300ms、速度 100Mbps 封顶；未测项按 0 计）">评分</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider" title={`综合评分 = 延迟 ${weightPct(scoreWeights.latency)}% + 下载速度 ${weightPct(scoreWeights.speed)}% + 纯净度 ${weightPct(scoreWeights.purity)}%（延迟 300ms、速度 100Mbps 封顶；未测项按 0 计）`}>评分</th>
                             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">测于</th>
                         </tr>
                     </thead>
@@ -763,8 +857,14 @@ export function SavedIpList() {
                                     <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{item.colo ? <RegionDisplay colo={item.colo} flagSize="sm" /> : '-'}</td>
                                     <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{item.sceneName}</td>
                                     <td className="px-4 py-2 whitespace-nowrap text-sm font-semibold text-blue-600 dark:text-blue-400">{typeof item.downloadMbps === 'number' && item.downloadMbps > 0 ? `${item.downloadMbps.toFixed(2)} Mbps` : '-'}</td>
-                                    <td className="px-4 py-2 whitespace-nowrap text-sm font-semibold text-emerald-600 dark:text-emerald-400">{typeof item.purity?.purityScore === 'number' ? `${item.purity.purityScore}/100` : '-'}</td>
-                                    <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-700 dark:text-gray-200">{compositeScore(item).toFixed(1)}</td>
+                                    <td className="px-4 py-2 whitespace-nowrap text-sm font-semibold text-emerald-600 dark:text-emerald-400">{typeof item.purity?.purityScore === 'number' ? `${item.purity.purityScore}/100` : '-'}
+                                        {item.purity && classifyHome(item.purity) !== 'other' && (
+                                            <span className={`ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-medium ${classifyHome(item.purity) === 'residential' ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'}`}>
+                                                {classifyHome(item.purity) === 'residential' ? '家宽' : '疑似家宽'}
+                                            </span>
+                                        )}
+                                    </td>
+                                    <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-700 dark:text-gray-200">{compositeScore(item, scoreWeights).toFixed(1)}</td>
                                     <td className={`px-4 py-2 whitespace-nowrap text-sm ${item.testedAt && Date.now() - item.testedAt > STALE_MS ? 'text-amber-600 dark:text-amber-400' : 'text-gray-500 dark:text-gray-400'}`} title={item.testedAt ? new Date(item.testedAt).toLocaleString() : '旧数据没有测试时间，重新保存或复测后会补上'}>{formatAge(item.testedAt)}</td>
                                 </tr>
                             ))

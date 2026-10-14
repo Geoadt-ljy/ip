@@ -1,5 +1,6 @@
 import { timingSafeEqual } from '../_lib/auth';
-import { compositeScore } from '../_lib/score';
+import { compositeScore, normalizeWeights, DEFAULT_SCORE_WEIGHTS, type ScoreWeights } from '../_lib/score';
+import { isHome } from '../_lib/residential';
 
 interface Env {
     IP_KV: KVNamespace;
@@ -91,6 +92,18 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const formatParam = (url.searchParams.get('format') || '').toLowerCase(); // simple：不追加速度/纯净度字段
     const simpleFormat = formatParam === 'simple' || url.searchParams.get('simple') === '1';
 
+    // 自定义综合评分权重：任意非负数（会自动归一化）；只写其中几项时，未写的按 0 计；都不写则用默认权重
+    const wLatency = url.searchParams.get('w_latency');
+    const wSpeed = url.searchParams.get('w_speed');
+    const wPurity = url.searchParams.get('w_purity');
+    const weights: ScoreWeights = (wLatency !== null || wSpeed !== null || wPurity !== null)
+        ? normalizeWeights({ latency: Number(wLatency ?? 0), speed: Number(wSpeed ?? 0), purity: Number(wPurity ?? 0) })
+        : { ...DEFAULT_SCORE_WEIGHTS };
+
+    // 家宽筛选：home=1 保留“家宽 + 疑似家宽”，home=strict 只保留确认的家宽；需要该 IP 做过纯净度检测
+    const homeParam = (url.searchParams.get('home') || '').toLowerCase();
+    const homeMode: 'off' | 'any' | 'strict' = homeParam === 'strict' ? 'strict' : (homeParam === '1' || homeParam === 'true') ? 'any' : 'off';
+
     const minSpeed = minSpeedParam !== null && minSpeedParam !== '' ? Number(minSpeedParam) : NaN;
     const minPurity = minPurityParam !== null && minPurityParam !== '' ? Number(minPurityParam) : NaN;
     let maxAgeMs = NaN;
@@ -146,6 +159,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
                 data = data.filter(item => typeof item.purity?.purityScore === 'number' && item.purity.purityScore >= minPurity);
             }
 
+            // 家宽：没有纯净度数据的 IP 无法判断，视为不满足
+            if (homeMode !== 'off') {
+                data = data.filter(item => item.purity && isHome(item.purity, homeMode === 'strict'));
+            }
+
             // 数据新鲜度：没有记录测试时间（testedAt）的旧数据视为不满足，重新保存一次即可补上
             if (Number.isFinite(maxAgeMs)) {
                 const now = Date.now();
@@ -167,7 +185,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         } else if (sortParam === 'purity') {
             allItems.sort((a, b) => num(b.purity?.purityScore) - num(a.purity?.purityScore) || byLatency(a, b));
         } else if (sortParam === 'score') {
-            allItems.sort((a, b) => compositeScore(b) - compositeScore(a) || byLatency(a, b));
+            allItems.sort((a, b) => compositeScore(b, weights) - compositeScore(a, weights) || byLatency(a, b));
         } else {
             allItems.sort(byLatency);
         }

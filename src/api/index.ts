@@ -104,21 +104,71 @@ export async function syncCloudflareIps(): Promise<CloudflareIps> {
     return handleResponse<CloudflareIps>(response);
 }
 
+// ---- 分组增删的本地同步提示 ----
+// Cloudflare KV 是最终一致的：刚删除 / 新建 / 重命名的分组，列表接口在一两分钟内可能仍返回旧数据，
+// 表现为“删除的分组又出现了、要刷新页面才消失”。这里在浏览器里记 3 分钟的提示，读取列表时据此修正显示。
+const SCENE_HINT_KEY = 'scene_sync_hints';
+const SCENE_HINT_TTL_MS = 3 * 60 * 1000;
+interface SceneHints { deleted: Record<string, number>; added: Record<string, number> }
+
+function readSceneHints(): SceneHints {
+    const empty: SceneHints = { deleted: {}, added: {} };
+    try {
+        const raw = localStorage.getItem(SCENE_HINT_KEY);
+        if (!raw) return empty;
+        const parsed = JSON.parse(raw) as SceneHints;
+        const now = Date.now();
+        const prune = (m: Record<string, number> | undefined) =>
+            Object.fromEntries(Object.entries(m || {}).filter(([, exp]) => typeof exp === 'number' && exp > now));
+        return { deleted: prune(parsed.deleted), added: prune(parsed.added) };
+    } catch {
+        return empty;
+    }
+}
+
+function writeSceneHints(h: SceneHints) {
+    try { localStorage.setItem(SCENE_HINT_KEY, JSON.stringify(h)); } catch { /* 存储不可用时忽略 */ }
+}
+
+function markSceneDeleted(name: string) {
+    const h = readSceneHints();
+    h.deleted[name] = Date.now() + SCENE_HINT_TTL_MS;
+    delete h.added[name];
+    writeSceneHints(h);
+}
+
+function markSceneAdded(name: string) {
+    const h = readSceneHints();
+    h.added[name] = Date.now() + SCENE_HINT_TTL_MS;
+    delete h.deleted[name];
+    writeSceneHints(h);
+}
+
 export async function saveResults(sceneName: string, results: ScanResult[], mode: 'overwrite' | 'append'): Promise<void> {
     const response = await authedFetch(`/api/results`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sceneName, results, mode }),
     });
-    return handleResponse<void>(response);
+    await handleResponse<void>(response);
+    markSceneAdded(sceneName);
 }
 
 export async function getScenes(): Promise<SceneInfo[]> {
     // 添加时间戳防止缓存
-    return handleResponse<SceneInfo[]>(await authedFetch(`/api/results?t=${Date.now()}`));
+    const list = await handleResponse<SceneInfo[]>(await authedFetch(`/api/results?t=${Date.now()}`));
+    // 用本地提示修正 KV 最终一致带来的短暂滞后：隐藏刚删除的分组，补上刚新建的分组
+    const hints = readSceneHints();
+    const result = list.filter((sc) => !(sc.name in hints.deleted));
+    for (const name of Object.keys(hints.added)) {
+        if (!result.some((sc) => sc.name === name)) result.push({ name } as SceneInfo);
+    }
+    return result;
 }
 
 export async function getSceneResults(name: string): Promise<ScanResult[]> {
+    // 刚删除的分组在 KV 里可能还读得到旧数据，直接视为空
+    if (name in readSceneHints().deleted) return [];
     // 添加时间戳防止缓存
     return handleResponse<ScanResult[]>(await authedFetch(`/api/results?scene=${encodeURIComponent(name)}&t=${Date.now()}`));
 }
@@ -291,7 +341,8 @@ export async function checkPurity(ips: string[], signal?: AbortSignal, refresh =
 /** 删除整个分组（场景）及其中所有 IP */
 export async function deleteScene(name: string): Promise<void> {
     const response = await authedFetch(`/api/results?scene=${encodeURIComponent(name)}`, { method: 'DELETE' });
-    return handleResponse<void>(response);
+    await handleResponse<void>(response);
+    markSceneDeleted(name);
 }
 
 /** 重命名分组（场景）；目标名称已存在时服务端返回 409 并给出提示 */
@@ -301,5 +352,7 @@ export async function renameScene(from: string, to: string): Promise<void> {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ from, to }),
     });
-    return handleResponse<void>(response);
+    await handleResponse<void>(response);
+    markSceneDeleted(from);
+    markSceneAdded(to);
 }

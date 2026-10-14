@@ -8,6 +8,7 @@ import {
 } from '../utils/scanner';
 import { useToast } from './Toast';
 import { useConfirm } from './ConfirmDialog';
+import { classifyHome } from '../../functions/_lib/residential';
 import { ListFilter, Save, ChevronDown, ChevronUp, X } from 'lucide-react';
 import { RegionDisplay } from './RegionDisplay';
 
@@ -26,6 +27,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
     const [isDownloadFilterEnabled, setIsDownloadFilterEnabled] = useState(false);
     const [downloadFilterValue, setDownloadFilterValue] = useState<string>('10');
     const [isPurityFilterEnabled, setIsPurityFilterEnabled] = useState(false);
+    const [isHomeFilterEnabled, setIsHomeFilterEnabled] = useState(false); // 仅保留家宽（含疑似），需要先检测纯净度
     const [purityFilterValue, setPurityFilterValue] = useState<string>('90');
     const [isPacketLossFilterEnabled, setIsPacketLossFilterEnabled] = useState(false);
     const [packetLossFilterValue, setPacketLossFilterValue] = useState<string>('10');
@@ -219,6 +221,9 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
 
     const purityFilteredResults = downloadFilteredResults.filter(r =>
         purityFilterActive ? (purityMap[r.ip] && purityMap[r.ip].purityScore >= effectivePurityValue) : true
+    ).filter(r =>
+        // 家宽筛选：没做过纯净度检测的 IP 无法判断，视为不满足
+        isHomeFilterEnabled ? (!!purityMap[r.ip] && classifyHome(purityMap[r.ip]) !== 'other') : true
     );
 
     const packetLossFilteredResults = purityFilteredResults.filter(r => {
@@ -594,6 +599,17 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <input
+                                        id="home-filter-enable"
+                                        type="checkbox"
+                                        checked={isHomeFilterEnabled}
+                                        onChange={(e) => setIsHomeFilterEnabled(e.target.checked)}
+                                        className="h-4 w-4 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                                    />
+                                    <label htmlFor="home-filter-enable" className="text-sm text-gray-600 dark:text-gray-300 cursor-pointer select-none" title="根据纯净度检测结果判断：排除机房、VPN、代理、Tor、中继和移动网络；上游没给出连接类型时按“疑似家宽”处理">仅家宽</label>
+                                    {isHomeFilterEnabled && Object.keys(purityMap).length === 0 && <span className="text-amber-600 dark:text-amber-400 text-xs">请先检测纯净度</span>}
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <input
                                         id="packet-loss-filter-enable"
                                         type="checkbox"
                                         checked={isPacketLossFilterEnabled}
@@ -788,6 +804,11 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                                             <td className="px-6 py-4 whitespace-nowrap text-sm">
                                                 <div className="flex items-center gap-2">
                                                     {purity ? <span className={purity.purityScore >= 90 ? 'text-green-600 dark:text-green-400' : purity.purityScore >= 70 ? 'text-yellow-600 dark:text-yellow-400' : 'text-red-600 dark:text-red-400'}>{purity.purityScore} / 100</span> : (purityFailed[ip] ? <span className="text-red-500" title="检测失败或上游无结果">失败</span> : purityPending[ip] ? <span className="text-gray-400 animate-pulse">检测中…</span> : '-')}
+                                                    {purity && classifyHome(purity) !== 'other' && (
+                                                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${classifyHome(purity) === 'residential' ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'}`} title={classifyHome(purity) === 'residential' ? '上游标注为家庭宽带' : '上游没有给出明确的连接类型，按标志位推断为家宽'}>
+                                                            {classifyHome(purity) === 'residential' ? '家宽' : '疑似家宽'}
+                                                        </span>
+                                                    )}
                                                     {purity && (
                                                         <button type="button" title="查看纯净度详情" onClick={() => setExpandedPurityIp(expanded ? null : `${ip}:${port}`)} className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-500 dark:text-gray-300">
                                                             {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
@@ -810,6 +831,8 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                                                             <div><span className="text-gray-500 dark:text-gray-400">VPN：</span><b className="font-semibold text-gray-800 dark:text-gray-100">{purity.vpn ? '是' : '否'}</b></div>
                                                             <div><span className="text-gray-500 dark:text-gray-400">Proxy：</span><b className="font-semibold text-gray-800 dark:text-gray-100">{purity.proxy ? '是' : '否'}</b></div>
                                                             <div><span className="text-gray-500 dark:text-gray-400">Tor：</span><b className="font-semibold text-gray-800 dark:text-gray-100">{purity.tor ? '是' : '否'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">连接类型：</span><b className="font-semibold text-gray-800 dark:text-gray-100">{purity.connectionType || '-'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">家宽判定：</span><b className="font-semibold text-gray-800 dark:text-gray-100">{classifyHome(purity) === 'residential' ? '家宽' : classifyHome(purity) === 'likely' ? '疑似家宽' : '非家宽'}</b></div>
                                                             <div><span className="text-gray-500 dark:text-gray-400">Relay：</span><b className="font-semibold text-gray-800 dark:text-gray-100">{purity.relay ? '是' : '否'}</b></div>
                                                             <div><span className="text-gray-500 dark:text-gray-400">数据中心：</span><b className="font-semibold text-gray-800 dark:text-gray-100">{purity.isDatacenter ? '是' : '否'}</b></div>
                                                             <div><span className="text-gray-500 dark:text-gray-400">移动网络：</span><b className="font-semibold text-gray-800 dark:text-gray-100">{purity.mobile ? '是' : '否'}</b></div>

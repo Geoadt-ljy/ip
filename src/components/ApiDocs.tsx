@@ -37,21 +37,23 @@ export function ApiDocs({ apiToken }: ApiDocsProps) {
                 接口支持以下筛选参数：
             </p>
             <ul className="text-sm text-gray-500 dark:text-gray-400 list-disc list-inside space-y-1 mb-4">
-                <li><code>scene=场景名称</code>: 按场景名称筛选，例如 <code>scene=家庭电信</code></li>
-                <li><code>latency=毫秒数</code>: 筛选延迟小于等于指定值的IP，例如 <code>latency=200</code></li>
-                <li><code>region=地区代码</code>: 按Cloudflare地区代码筛选 (例如: LAX, SJC)，不区分大小写。例如 <code>region=SJC</code></li>
-                <li><code>count=数量</code>: 返回指定数量的IP（按排序结果取前 N 个），例如 <code>count=10</code></li>
-                <li><code>min_speed=Mbps</code>: 只要下载速度不低于该值的IP（未测速的不返回），例如 <code>min_speed=30</code></li>
-                <li><code>min_purity=0-100</code>: 只要纯净度不低于该值的IP（未检测的不返回），例如 <code>min_purity=90</code></li>
-                <li><code>max_age=时长</code>: 只要最近测试过的IP，数字默认为小时，支持 <code>h</code>/<code>d</code> 后缀，例如 <code>max_age=24h</code>、<code>max_age=7d</code>（没有测试时间的旧数据不返回，重新保存或复测后会补上）</li>
-                <li><code>sort=排序方式</code>: <code>latency</code>（默认）、<code>speed</code>、<code>purity</code>、<code>score</code>（综合评分：延迟 40% + 下载速度 35% + 纯净度 25%，未测项按 0 计）</li>
-                <li><code>format=simple</code>: 精简输出，只保留 <code>IP:端口#地区|场景|延迟ms</code>，不追加速度和纯净度字段</li>
+                <li><code className="break-all">scene=场景名称</code>: 按场景名称筛选，例如 <code className="break-all">scene=家庭电信</code></li>
+                <li><code className="break-all">latency=毫秒数</code>: 筛选延迟小于等于指定值的IP，例如 <code className="break-all">latency=200</code></li>
+                <li><code className="break-all">region=地区代码</code>: 按Cloudflare地区代码筛选 (例如: LAX, SJC)，不区分大小写。例如 <code className="break-all">region=SJC</code></li>
+                <li><code className="break-all">count=数量</code>: 返回指定数量的IP（按排序结果取前 N 个），例如 <code className="break-all">count=10</code></li>
+                <li><code className="break-all">min_speed=Mbps</code>: 只要下载速度不低于该值的IP（未测速的不返回），例如 <code className="break-all">min_speed=30</code></li>
+                <li><code className="break-all">min_purity=0-100</code>: 只要纯净度不低于该值的IP（未检测的不返回），例如 <code className="break-all">min_purity=90</code></li>
+                <li><code className="break-all">max_age=时长</code>: 只要最近测试过的IP，数字默认为小时，支持 <code className="break-all">h</code>/<code className="break-all">d</code> 后缀，例如 <code className="break-all">max_age=24h</code>、<code className="break-all">max_age=7d</code>（没有测试时间的旧数据不返回，重新保存或复测后会补上）</li>
+                <li><code className="break-all">sort=排序方式</code>: <code className="break-all">latency</code>（默认）、<code className="break-all">speed</code>、<code className="break-all">purity</code>、<code className="break-all">score</code>（综合评分：延迟 40% + 下载速度 35% + 纯净度 25%，未测项按 0 计）</li>
+                <li><code className="break-all">w_latency</code> / <code className="break-all">w_speed</code> / <code className="break-all">w_purity</code>: 自定义综合评分权重（任意非负数，会自动归一化），仅 <code className="break-all">sort=score</code> 时生效，例如 <code className="break-all">w_speed=60&amp;w_latency=30&amp;w_purity=10</code>；只写其中几项时，未写的按 0 计</li>
+                <li><code className="break-all">home=1</code>: 只要家宽 IP（含“疑似家宽”）；<code className="break-all">home=strict</code> 只要上游明确标注为家宽的。需要该 IP 做过纯净度检测，没检测的不返回</li>
+                <li><code className="break-all">format=simple</code>: 精简输出，只保留 <code className="break-all">IP:端口#地区|场景|延迟ms</code>，不追加速度和纯净度字段</li>
             </ul>
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">
                 示例:
             </p>
-            <div className="text-sm text-gray-500 dark:text-gray-400 mb-2">
-                    {`${window.location.origin}/api/getips?token=${apiToken || 'TOKEN'}&scene=家庭电信&latency=200&region=SJC&min_speed=30&min_purity=90&sort=score&count=10`}
+            <div className="px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded text-xs font-mono text-gray-800 dark:text-gray-200 break-all whitespace-pre-wrap border border-gray-200 dark:border-gray-600 mb-2 max-w-full">
+                {`${window.location.origin}/api/getips?token=${apiToken || 'TOKEN'}&scene=家庭电信&latency=200&region=SJC&min_speed=30&min_purity=90&sort=score&count=10`}
             </div>
         </div>
     );

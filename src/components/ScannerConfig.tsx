@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, ChangeEvent } from 'react';
 import { CloudflareIps, getThirdPartySourceList, getThirdPartySourceIps } from '../api';
 
 type SourceRowStatus = 'pending' | 'loading' | 'done' | 'error';
@@ -25,7 +25,8 @@ import {
     type AgentResult, type AgentProbeResult,
 } from '../utils/localAgent';
 import { useToast } from './Toast';
-import { Gauge, Play, StopCircle, Loader2, Pause, Square, Cpu, RefreshCw, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { Gauge, Play, StopCircle, Loader2, Pause, Square, Cpu, RefreshCw, AlertTriangle, CheckCircle2, Upload } from 'lucide-react';
+import { parseIpFileText, MAX_IMPORT_TARGETS } from '../utils/ipFile';
 import { useConfirm } from './ConfirmDialog';
 
 interface IpScannerConfigAndControlProps {
@@ -45,6 +46,7 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
     const [selectedPort, setSelectedPort] = useState(443);
     const [ipSource, setIpSource] = useState<'cf' | 'cm' | 'third' | 'custom'>('cf');
     const [customIps, setCustomIps] = useState('');
+    const customFileRef = useRef<HTMLInputElement | null>(null);
     const [isScanning, setIsScanning] = useState(false);
     const [progress, setProgress] = useState(0);
     const [total, setTotal] = useState(0);
@@ -187,6 +189,33 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
             return showLocationWarning();
         }
         return true;
+    };
+
+    // 上传 txt / csv：解析后与文本框里已有的内容合并去重
+    const handleCustomFile = async (e: ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        e.target.value = ''; // 允许重复选择同一个文件
+        if (!file) return;
+        if (file.size > 2 * 1024 * 1024) {
+            showToast('文件过大（超过 2MB）', 'error');
+            return;
+        }
+        try {
+            const parsed = parseIpFileText(await file.text());
+            if (parsed.targets.length === 0) {
+                showToast('文件中没有识别到有效的 IPv4 / 域名', 'warning');
+                return;
+            }
+            const existing = customIps.split(/[\s,，]+/).map(x => x.trim()).filter(Boolean);
+            const merged = Array.from(new Set([...existing, ...parsed.targets])).slice(0, MAX_IMPORT_TARGETS);
+            setCustomIps(merged.join('\n'));
+            const notes: string[] = [];
+            if (parsed.ignored > 0) notes.push(`忽略 ${parsed.ignored} 项无法识别的内容（如 CIDR 网段、IPv6）`);
+            if (parsed.truncated || merged.length >= MAX_IMPORT_TARGETS) notes.push(`数量超过 ${MAX_IMPORT_TARGETS} 个上限，多余部分已截断`);
+            showToast(`已导入 ${parsed.targets.length} 个目标，当前共 ${merged.length} 个${notes.length ? '；' + notes.join('；') : ''}`, notes.length ? 'warning' : 'success');
+        } catch {
+            showToast('读取文件失败', 'error');
+        }
     };
 
     const prepareTargets = async (countNum: number): Promise<{ targets: string[]; resolvedMap?: Record<string, string | null> } | null> => {
@@ -602,7 +631,29 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
 
             {ipSource === 'custom' && (
                 <div className="mb-4">
-                    <label htmlFor="custom-ips" className="block text-gray-700 dark:text-gray-300 text-sm font-bold mb-1">自定义 IP（每行一个，也支持 IP:端口）:</label>
+                    <div className="flex flex-wrap items-center gap-2 mb-1">
+                        <label htmlFor="custom-ips" className="text-gray-700 dark:text-gray-300 text-sm font-bold">自定义 IP（每行一个，也支持 IP:端口）:</label>
+                        <button
+                            type="button"
+                            onClick={() => customFileRef.current?.click()}
+                            disabled={isScanning || isPreparing}
+                            title="支持 txt / csv：每行一个 IP、IP:端口或域名，可带 # 备注；CSV 可带 IP 和端口列（本系统导出的文件可直接导入）"
+                            className="px-3 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800 hover:bg-blue-200 disabled:opacity-50 dark:bg-blue-900/40 dark:text-blue-300"
+                        >
+                            <Upload className="w-3.5 h-3.5 mr-1 inline-block" />
+                            上传 txt / csv
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setCustomIps('')}
+                            disabled={isScanning || isPreparing || customIps.trim() === ''}
+                            className="px-3 py-1 text-xs font-medium rounded-full bg-gray-200 text-gray-700 hover:bg-gray-300 disabled:opacity-50 dark:bg-gray-600 dark:text-gray-200"
+                        >
+                            清空
+                        </button>
+                        <span className="text-xs text-gray-400">已填 {customIps.split(/[\s,，]+/).filter(Boolean).length} 个</span>
+                        <input ref={customFileRef} type="file" accept=".txt,.csv,text/plain,text/csv" onChange={(e) => void handleCustomFile(e)} className="hidden" />
+                    </div>
                     <textarea id="custom-ips" value={customIps} onChange={(e) => setCustomIps(e.target.value)} disabled={isScanning || isPreparing} rows={5} className="w-full border rounded p-3 font-mono text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white" placeholder="104.16.1.1\n104.17.2.2:443\n1.1.1.1" />
                 </div>
             )}
