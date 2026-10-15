@@ -23,7 +23,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             const text = typeof item === 'string' ? item.trim() : '';
             if (!text) continue; // 忽略空行
             let u: URL | null = null;
-            try { u = new URL(text); } catch { /* invalid */ }
+            try { u = new URL(text); } catch { /* 无效 */ }
             if (!u || (u.protocol !== 'https:' && u.protocol !== 'http:') || text.length > 2048) {
                 return new Response(JSON.stringify({ message: `源地址无效（需为 http/https 链接）：${text.slice(0, 80)}` }), { status: 400 });
             }

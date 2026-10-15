@@ -36,10 +36,10 @@ Cloudflare Dashboard → `Workers & Pages` → `KV` → `Create a namespace`，�
 
 | 项目 | 值 |
 | --- | --- |
-| Production branch | `main` |
-| Framework preset | 无 |
-| Build command | `npm run build` |
-| Build output directory | `dist` |
+| 生产分支（Production branch） | `main` |
+| 框架预设（Framework preset） | 无 |
+| 构建命令（Build command） | `npm run build` |
+| 构建输出目录（Build output directory） | `dist` |
 
 第一次构建可能失败，因为环境变量和 KV 还没配置，继续下一步即可。
 
@@ -130,6 +130,7 @@ IP:端口#地区|场景|延迟ms
 | `sort` | `latency`（默认）、`speed`、`purity`、`score`，除延迟外均为从高到低，延迟低者优先作次级排序 |
 | `format` | `simple` 时只输出 `IP:端口#地区|场景|延迟ms`，不追加速度和纯净度 |
 | `w_latency` `w_speed` `w_purity` | 自定义综合评分权重（任意非负数，自动归一化），仅 `sort=score` 时生效；只写其中几项时，未写的按 0 计 |
+| `show_home` | `1` 时输出家宽标记（默认不输出）：家宽的 IP 在延迟后面追加 `|家宽`，疑似家宽追加 `|家宽?`，例如 `...|45ms|家宽|86.20Mbps|95/100`；需要该 IP 做过纯净度检测，与 `home`（筛选）互相独立 |
 | `home` | `1`：只要家宽（含疑似家宽）；`strict`：只要上游明确标注为家宽的。需要该 IP 做过纯净度检测，没检测的不返回 |
 
 数值无效的参数会被忽略。

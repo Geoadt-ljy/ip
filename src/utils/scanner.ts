@@ -1,4 +1,3 @@
-// e:\CODE\kgcfip\src\utils\scanner.ts
 /**
  * 扫描结果的数据结构
  */
@@ -28,7 +27,7 @@ export interface ScanResult {
 export function isDomainName(host: string): boolean {
     // IPv6（含方括号或包含多个冒号）一律视为IP
     if (host.includes(':')) return false;
-    // IPv4
+    // IPv4 地址
     if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(host)) return false;
     // 形如 example.com
     return /^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)+$/.test(host);
@@ -197,7 +196,7 @@ export async function testIpLatency(ip: string, port: number, timeout: number): 
             await second.arrayBuffer().catch(() => undefined);
             return { latency: Date.now() - secondRequestStart, colo };
         } catch (error: any) {
-            lastError = error?.name === 'AbortError' ? 'Timeout' : 'Error';
+            lastError = error?.name === 'AbortError' ? '超时' : '错误';
         } finally {
             clearTimeout(timeoutId);
         }

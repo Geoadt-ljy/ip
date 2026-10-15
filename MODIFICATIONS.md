@@ -25,7 +25,7 @@
 - 用户点击“丢包率测试”后，才对所选 IP 开始测试；可手动取消/补选。
 
 
-## 2026-10-09 follow-up
+## 2026-10-09 补充更新
 - Added shared IPv4 checkbox selection for browser download testing, purity checks, and optional selected-only KV saving.
 - Added a combined “一键测速 + 纯净度” action.
 - Browser-measured download speed and purity results are saved as optional fields without changing the existing `IP:port#region|scene|latency` line format. TXT exports and /api/getips append `|xx.xxMbps|xx/100`（无“下载:”“纯净度:”标签） after the original comment fields; CSV adds two optional columns.
@@ -68,4 +68,8 @@
 - 自定义 IP 支持上传 txt / csv（`src/utils/ipFile.ts`）：兼容本系统导出的 TXT / CSV，识别 IPv4、IP:端口、域名，忽略 `#` 备注，CIDR 和 IPv6 暂不支持。
 - 修复删除分组后图标要刷新页面才消失：KV 最终一致，列表接口短时间内会返回旧数据；现在在浏览器里记 3 分钟的“已删除 / 已新建”提示，读取分组列表时据此修正（`src/api/index.ts`）。
 - 修复手机端 API 示例过长撑宽页面：示例改为可换行的代码框，参数说明里的代码也允许换行。
+
+## 2026-10-16：家宽字样与中文化
+- `/api/getips` 新增可选参数 `show_home=1`：输出家宽标记，位置紧跟在延迟之后（`...|45ms|家宽|86.20Mbps|95/100`），判为疑似家宽的输出 `|家宽?`，默认不输出；`format=simple` 时也会按该参数输出。已保存列表的复制、TXT 导出同样把家宽标记放在延迟之后，CSV 导出新增“家宽”列。
+- 把代码里的英文注释、英文提示信息（登录、令牌校验、第三方源、本地 Agent 等）和文档里的英文标签改为中文；删除了 `scanner.ts` 开头泄露本机路径的注释。
 

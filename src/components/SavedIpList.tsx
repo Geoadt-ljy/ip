@@ -5,11 +5,11 @@ import { compositeScore, normalizeWeights } from '../../functions/_lib/score';
 import { classifyHome } from '../../functions/_lib/residential';
 import { getColoName } from '../utils/colo';
 import { useToast } from './Toast';
-import { useConfirm } from './ConfirmDialog'; // Import Trash2 and RotateCw
+import { useConfirm } from './ConfirmDialog'; // 确认对话框
 import { ListChecks, Trash2, RotateCw, FileText, File, Copy, Pencil, Settings2, Download, Upload, Activity, Save, Square } from 'lucide-react';
 import { RegionDisplay } from './RegionDisplay';
 
-// Type for data stored in KV, which does not include `isAvailable`
+// 保存在 KV 中的数据类型，不包含 `isAvailable`
 interface SavedIpData {
     ip: string;
     port: number;
@@ -87,7 +87,7 @@ export function SavedIpList() {
     const [showWeights, setShowWeights] = useState(false);
     const [weightInputs, setWeightInputs] = useState<WeightInputs>(loadWeightInputs);
     useEffect(() => {
-        try { localStorage.setItem(WEIGHTS_KEY, JSON.stringify(weightInputs)); } catch { /* ignore */ }
+        try { localStorage.setItem(WEIGHTS_KEY, JSON.stringify(weightInputs)); } catch { /* 忽略 */ }
     }, [weightInputs]);
     const scoreWeights = normalizeWeights({
         latency: Number(weightInputs.latency),
@@ -112,7 +112,7 @@ export function SavedIpList() {
 
     const loadData = async () => {
         setLoading(true);
-        setItems([]); // Clear items before loading to avoid confusion
+        setItems([]); // 加载前先清空列表，避免显示旧数据造成混淆
         try {
             // 1. 获取所有场景名
             const scenes = await getScenes();
@@ -463,7 +463,7 @@ export function SavedIpList() {
             return;
         }
 
-        const headers = ['IP地址', '端口', '延迟(ms)', '地区代码', '地区名称', '场景', '下载速度(Mbps)', '纯净度(/100)'];
+        const headers = ['IP地址', '端口', '延迟(ms)', '地区代码', '地区名称', '场景', '下载速度(Mbps)', '纯净度(/100)', '家宽'];
         const csvContent = [
             headers.join(','),
             ...filteredItemsSorted.map(item => [
@@ -475,9 +475,10 @@ export function SavedIpList() {
                 item.sceneName,
                 typeof item.downloadMbps === 'number' && item.downloadMbps > 0 ? item.downloadMbps.toFixed(2) : '',
                 typeof item.purity?.purityScore === 'number' ? item.purity.purityScore : '',
+                item.purity ? (classifyHome(item.purity) === 'residential' ? '家宽' : classifyHome(item.purity) === 'likely' ? '家宽?' : '') : '',
             ].map(field => {
                 const stringField = String(field);
-                // Escape quotes and wrap in quotes if contains comma, quote or newline
+                // 如果包含逗号、引号或换行，则转义引号并用引号包裹
                 if (stringField.includes(',') || stringField.includes('"') || stringField.includes('\n')) {
                     return `"${stringField.replace(/"/g, '""')}"`;
                 }
@@ -485,7 +486,7 @@ export function SavedIpList() {
             }).join(','))
         ].join('\n');
 
-        // Add BOM for Excel compatibility
+        // 添加 BOM，保证 Excel 正确识别中文
         const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
         const link = document.createElement('a');
         const url = URL.createObjectURL(blob);
@@ -510,11 +511,12 @@ export function SavedIpList() {
                 const latency = `${item.latency}ms`;
                 const speedComment = typeof item.downloadMbps === 'number' && item.downloadMbps > 0 ? `|${item.downloadMbps.toFixed(2)}Mbps` : '';
                 const purityComment = typeof item.purity?.purityScore === 'number' ? `|${item.purity.purityScore}/100` : '';
-                const comment = `${regionName}|${sceneName}|${latency}${speedComment}${purityComment}`;
+                const homeComment = item.purity ? (classifyHome(item.purity) === 'residential' ? '|家宽' : classifyHome(item.purity) === 'likely' ? '|家宽?' : '') : '';
+                const comment = `${regionName}|${sceneName}|${latency}${homeComment}${speedComment}${purityComment}`;
                 txtContent += `${item.ip}:${item.port}#${comment}\n`;
             }
 
-            // Create a new file with the TXT data.
+            // 用 TXT 数据创建新文件
             const blob = new Blob([txtContent], { type: 'text/plain;charset=utf-8;' });
             const link = document.createElement('a');
             const url = URL.createObjectURL(blob);
@@ -543,7 +545,8 @@ export function SavedIpList() {
             const latency = `${item.latency}ms`;
             const speedComment = typeof item.downloadMbps === 'number' && item.downloadMbps > 0 ? `|${item.downloadMbps.toFixed(2)}Mbps` : '';
             const purityComment = typeof item.purity?.purityScore === 'number' ? `|${item.purity.purityScore}/100` : '';
-            const comment = `${regionName}|${sceneName}|${latency}${speedComment}${purityComment}`;
+            const homeComment = item.purity ? (classifyHome(item.purity) === 'residential' ? '|家宽' : classifyHome(item.purity) === 'likely' ? '|家宽?' : '') : '';
+            const comment = `${regionName}|${sceneName}|${latency}${homeComment}${speedComment}${purityComment}`;
             txtContent += `${item.ip}:${item.port}#${comment}\n`;
         }
 

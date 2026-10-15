@@ -4,9 +4,9 @@
 
 ## Cloudflare Pages
 
-- Build command: `npm run build`
-- Build output directory: `dist`
-- Node.js: 18+
+- 构建命令（Build command）：`npm run build`
+- 构建输出目录（Build output directory）：`dist`
+- Node.js 版本：18 及以上
 - `wrangler.toml` 刻意不包含 `pages_build_output_dir` 和 KV 配置：线上绑定在 Cloudflare Dashboard 中配置。部署时出现“字段缺失、配置文件仅用于本地开发”的警告属正常现象，可忽略。
 
 ## KV

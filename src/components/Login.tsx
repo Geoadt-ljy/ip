@@ -49,7 +49,7 @@ export function Login({ onLogin }: LoginProps) {
     return (
         <div className="min-h-screen w-full flex items-center justify-center bg-gradient-to-br from-gray-50 to-gray-200 dark:from-gray-900 dark:to-gray-800 overflow-y-auto p-4 transition-colors duration-200">
             <main className="flex flex-col items-center gap-12 w-full max-w-5xl mx-auto my-12">
-                {/* Top: Header & Description */}
+                {/* 顶部：标题与说明 */}
                 <div className="text-center text-gray-800 dark:text-gray-200 space-y-4 -mt-4">
                     <div className="flex items-center justify-center gap-4">
                         <img src="/img/logo.svg" alt="Logo" className="w-14 h-14" />
@@ -60,7 +60,7 @@ export function Login({ onLogin }: LoginProps) {
                     </p>
                 </div>
 
-                {/* Middle: Login Form */}
+                {/* 中部：登录表单 */}
                 <div className="bg-white/60 dark:bg-gray-800/60 backdrop-blur-lg p-8 rounded-2xl shadow-2xl w-full max-w-md border border-gray-200 dark:border-gray-700">
                     <h2 className="text-2xl font-bold mb-6 text-center text-gray-800 dark:text-gray-100">管理员登录</h2>
                     <form onSubmit={handleSubmit} className="space-y-6">
@@ -97,7 +97,7 @@ export function Login({ onLogin }: LoginProps) {
                     </form>
                 </div>
 
-                {/* Bottom: Features */}
+                {/* 底部：功能介绍 */}
                 <div className="w-full">
                     <h2 className="text-2xl font-bold mb-10 text-center text-gray-800 dark:text-gray-200 tracking-wider">特色功能</h2>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 max-w-6xl mx-auto">

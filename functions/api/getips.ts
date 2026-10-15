@@ -1,6 +1,6 @@
 import { timingSafeEqual } from '../_lib/auth';
 import { compositeScore, normalizeWeights, DEFAULT_SCORE_WEIGHTS, type ScoreWeights } from '../_lib/score';
-import { isHome } from '../_lib/residential';
+import { isHome, classifyHome } from '../_lib/residential';
 
 interface Env {
     IP_KV: KVNamespace;
@@ -104,6 +104,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const homeParam = (url.searchParams.get('home') || '').toLowerCase();
     const homeMode: 'off' | 'any' | 'strict' = homeParam === 'strict' ? 'strict' : (homeParam === '1' || homeParam === 'true') ? 'any' : 'off';
 
+    // 输出家宽标记（默认不输出）：show_home=1 时，家宽 / 疑似家宽的 IP 在延迟后面追加 |家宽 或 |家宽?（疑似家宽）
+    const showHome = ['1', 'true'].includes((url.searchParams.get('show_home') || '').toLowerCase());
+
     const minSpeed = minSpeedParam !== null && minSpeedParam !== '' ? Number(minSpeedParam) : NaN;
     const minPurity = minPurityParam !== null && minPurityParam !== '' ? Number(minPurityParam) : NaN;
     let maxAgeMs = NaN;
@@ -113,7 +116,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     }
 
     if (!env.APITOKEN) {
-         return new Response('System error: APITOKEN not configured', { status: 500 });
+         return new Response('系统错误：未配置 APITOKEN', { status: 500 });
     }
 
     if (!token || !(await timingSafeEqual(token, env.APITOKEN))) {
@@ -170,7 +173,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
                 data = data.filter(item => typeof item.testedAt === 'number' && now - item.testedAt <= maxAgeMs);
             }
 
-            // Add sceneName to each item for later use
+            // 给每条数据附上场景名，供后面拼接使用
             return data.map(item => ({ ...item, sceneName }));
         });
 
@@ -190,7 +193,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
             allItems.sort(byLatency);
         }
 
-        // If count parameter is provided, slice the array
+        // 如果传了 count 参数，只取前 N 条
         if (countParam) {
             const count = parseInt(countParam);
             if (!isNaN(count) && count > 0) {
@@ -202,6 +205,14 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
             const region = item.colo ? getColoName(item.colo) : '未知';
             const alias = `${region}|${item.sceneName}`;
             let line = `${item.ip}:${item.port}#${alias}|${item.latency}ms`;
+
+            // 家宽标记（可选）：只有做过纯净度检测、且判为家宽 / 疑似家宽的才输出，紧跟在延迟之后
+            if (showHome && item.purity) {
+                const home = classifyHome(item.purity);
+                if (home === 'residential') line += '|家宽';
+                else if (home === 'likely') line += '|家宽?';
+            }
+
             if (simpleFormat) return line;
 
             const speed = Number(item.downloadMbps);

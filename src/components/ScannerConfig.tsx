@@ -40,7 +40,7 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
     const [count, setCount] = useState<string>('500');
     const [threads, setThreads] = useState<string>('8');
     const [latencyLimit, setLatencyLimit] = useState<string>('1000');
-/*  */    const [countError, setCountError] = useState<string>('');
+    const [countError, setCountError] = useState<string>('');
     const [threadsError, setThreadsError] = useState<string>('');
     const [latencyLimitError, setLatencyLimitError] = useState<string>('');
     const [selectedPort, setSelectedPort] = useState(443);

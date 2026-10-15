@@ -23,7 +23,7 @@ interface FfraudResponse {
 }
 
 function purityFromFraud(r: FfraudResponse): { score: number; label: string } {
-  // FFraud's fraud_score is a risk score (higher = worse), so purity is its inverse.
+  // FFraud 的 fraud_score 是风险分（越高越差），纯净度取其反向值。
   const fraud = Math.max(0, Math.min(100, Number(r.fraud_score ?? 0)));
   const score = Math.round(100 - fraud);
   return {
@@ -75,9 +75,9 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       });
     }
 
-    // Cloudflare Workers/Pages Functions have a per-invocation subrequest cap.
-    // Limit each invocation to 20 upstream calls (well below the usual 50-call
-    // cap) and keep them sequential. The frontend also sends batches of 20.
+    // Cloudflare Workers / Pages Functions 对单次调用的子请求数量有上限。
+    // 每次调用最多向上游发 20 次请求（远低于常见的 50 次上限），
+    // 并且按顺序执行。前端也是按每批 20 个发送的。
     const results: Record<string, unknown> = {};
     for (const ip of ips) {
       try {
@@ -132,7 +132,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
           } catch { /* 缓存写入失败（如额度用尽）不影响本次结果 */ }
         }
       } catch {
-        // A failed upstream lookup only skips this IP; it must not abort the batch.
+        // 某个 IP 上游查询失败时只跳过该 IP，不能中断整批请求。
         continue;
       }
     }

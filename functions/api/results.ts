@@ -111,7 +111,7 @@ export const onRequestDelete: PagesFunction<Env> = async (context) => {
   const sceneName = url.searchParams.get('scene');
 
   if (!sceneName || !validSceneName(sceneName)) {
-    return new Response(JSON.stringify({ message: 'Missing or invalid scene name' }), { status: 400 });
+    return new Response(JSON.stringify({ message: '缺少或无效的场景名' }), { status: 400 });
   }
 
   try {

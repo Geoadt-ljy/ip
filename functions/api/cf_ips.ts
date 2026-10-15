@@ -2,7 +2,7 @@ interface Env {
     IP_KV: KVNamespace;
 }
 
-// Define types for better safety
+// 定义类型，提高代码安全性
 interface CloudflareIPsResponse {
     result: {
         ipv4_cidrs: string[];
@@ -20,7 +20,7 @@ interface StoredCloudflareIPs {
     etag: string;
 }
 
-// Helper for JSON responses
+// 返回 JSON 响应的辅助函数
 const jsonResponse = (data: any, status = 200, headers: HeadersInit = {}) => {
     return new Response(JSON.stringify(data), {
         status,
@@ -72,7 +72,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
             await env.IP_KV.put("CF_IPS_DATA", JSON.stringify(result));
             return jsonResponse(result);
         }
-        return jsonResponse({ message: "Failed to fetch from Cloudflare API", errors: data.errors }, 500);
+        return jsonResponse({ message: "从 Cloudflare API 获取失败", errors: data.errors }, 500);
     } catch (e) {
         return jsonResponse({ message: (e as Error).message }, 500);
     }

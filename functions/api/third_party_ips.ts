@@ -80,7 +80,7 @@ async function fetchOne(srcUrl: string): Promise<SourceResult> {
         });
 
         if (!r.ok) {
-            return { url: srcUrl, status: 'error', code: r.status, error: `Status ${r.status}` };
+            return { url: srcUrl, status: 'error', code: r.status, error: `状态码 ${r.status}` };
         }
         const text = await r.text();
         if (text.length > 5 * 1024 * 1024) {
@@ -89,7 +89,7 @@ async function fetchOne(srcUrl: string): Promise<SourceResult> {
         return { url: srcUrl, status: 'ok', text };
     } catch (err) {
         if ((err as Error).name === 'AbortError') {
-            return { url: srcUrl, status: 'error', error: 'Timeout' };
+            return { url: srcUrl, status: 'error', error: '请求超时' };
         }
         return { url: srcUrl, status: 'error', error: (err as Error).message };
     } finally {
@@ -143,7 +143,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         // 只接受 http/https 链接（Pages Functions 运行在 Cloudflare 边缘，访问不到内网）
         const wanted = target.trim();
         let wantedUrl: URL | null = null;
-        try { wantedUrl = new URL(wanted); } catch { /* invalid */ }
+        try { wantedUrl = new URL(wanted); } catch { /* 无效 */ }
         if (!wantedUrl || (wantedUrl.protocol !== 'https:' && wantedUrl.protocol !== 'http:')) {
             return new Response(JSON.stringify({ message: '源地址无效' }), {
                 status: 400,

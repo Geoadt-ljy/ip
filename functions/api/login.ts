@@ -32,7 +32,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
 
     if (typeof password !== 'string' || password.length === 0 || password.length > 256) {
-        return json({ success: false, message: 'Invalid request' }, 400);
+        return json({ success: false, message: '请求无效' }, 400);
     }
 
     const rlKey = `rl:login:${request.headers.get('CF-Connecting-IP') || 'unknown'}`;
@@ -46,7 +46,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     if (await timingSafeEqual(password, env.LOGINPW)) {
       if (env.IP_KV && fails > 0) {
-        try { await env.IP_KV.delete(rlKey); } catch { /* ignore */ }
+        try { await env.IP_KV.delete(rlKey); } catch { /* 忽略 */ }
       }
       // 密码正确：签发 7 天有效的签名令牌（不再返回 JWT_SECRET 原文）。
       // 同时返回 APITOKEN 供前端展示给用户用于公共接口调用。
@@ -58,10 +58,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
 
     if (env.IP_KV) {
-      try { await env.IP_KV.put(rlKey, String(fails + 1), { expirationTtl: WINDOW_SECONDS }); } catch { /* ignore */ }
+      try { await env.IP_KV.put(rlKey, String(fails + 1), { expirationTtl: WINDOW_SECONDS }); } catch { /* 忽略 */ }
     }
-    return json({ success: false, message: 'Password incorrect' }, 401);
+    return json({ success: false, message: '密码错误' }, 401);
   } catch (e) {
-    return json({ success: false, message: 'Invalid request' }, 400);
+    return json({ success: false, message: '请求无效' }, 400);
   }
 };

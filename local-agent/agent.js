@@ -248,8 +248,8 @@ function measureLatency(host, port, opt) {
 
     const cleanup = () => {
       if (timer) clearTimeout(timer);
-      try { if (tlsSocket) tlsSocket.destroy(); } catch (_) { /* noop */ }
-      try { if (tcpSocket) tcpSocket.destroy(); } catch (_) { /* noop */ }
+      try { if (tlsSocket) tlsSocket.destroy(); } catch (_) { /* 忽略 */ }
+      try { if (tcpSocket) tcpSocket.destroy(); } catch (_) { /* 忽略 */ }
     };
     const done = (error) => {
       if (settled) return;
@@ -326,10 +326,10 @@ function measureDownloadSpeed(host, port, opt) {
   return new Promise((resolve) => {
     let parsed;
     try { parsed = new URL(opt.downloadUrl); } catch (_) {
-      return resolve({ downloadMbps: 0, downloadBytes: 0, error: 'invalid download URL' });
+      return resolve({ downloadMbps: 0, downloadBytes: 0, error: '下载地址无效' });
     }
     if (parsed.protocol !== 'https:') {
-      return resolve({ downloadMbps: 0, downloadBytes: 0, error: 'download URL must use https' });
+      return resolve({ downloadMbps: 0, downloadBytes: 0, error: '下载地址必须使用 https' });
     }
 
     const ip = String(host).replace(/^\[|\]$/g, '');
@@ -353,7 +353,7 @@ function measureDownloadSpeed(host, port, opt) {
       settled = true;
       if (hardTimer) clearTimeout(hardTimer);
       if (durationTimer) clearTimeout(durationTimer);
-      try { if (socket) socket.destroy(); } catch (_) { /* noop */ }
+      try { if (socket) socket.destroy(); } catch (_) { /* 忽略 */ }
 
       // 只统计 HTTP body，不把响应头算进下载速度。
       const elapsed = Math.max(0.001, elapsedSeconds());
@@ -361,7 +361,7 @@ function measureDownloadSpeed(host, port, opt) {
       const mbps = bytes > 0 ? (bytes * 8) / dataSeconds / 1000000 : 0;
       let message = error ? String(error.message || error) : '';
       if (!message && statusCode && statusCode !== 200) message = `HTTP ${statusCode}`;
-      if (!message && !headersDone) message = 'download response headers not received';
+      if (!message && !headersDone) message = '未收到下载响应头';
 
       resolve({
         downloadMbps: Number(mbps.toFixed(2)),

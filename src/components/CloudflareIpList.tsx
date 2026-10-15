@@ -24,7 +24,7 @@ export function CloudflareIpList({ onDataLoaded }: CloudflareIpListProps) {
                 setLoading(false);
                 return; // 成功则直接返回
             } catch (err) {
-                console.error(`Failed to fetch Cloudflare IPs (attempt ${attempt}/${retryCount})`, err);
+                console.error(`获取 Cloudflare IP 失败（第 ${attempt}/${retryCount} 次尝试）`, err);
                 if (attempt < retryCount) {
                     // 指数退避：1s, 2s, 3s
                     const delay = attempt * 1000;
