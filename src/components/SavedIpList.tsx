@@ -83,7 +83,7 @@ export function SavedIpList() {
 
     const [sceneList, setSceneList] = useState<string[]>([]); // 全部分组（包含没有 IP 的空分组）
     const [sortKey, setSortKey] = useState<SortKey>('latency');
-    const [homeOnly, setHomeOnly] = useState(false); // 仅家宽（含疑似），需要保存时带有纯净度数据
+    const [homeOnly, setHomeOnly] = useState(false); // 仅家宽，需要保存时带有纯净度数据
     const [showWeights, setShowWeights] = useState(false);
     const [weightInputs, setWeightInputs] = useState<WeightInputs>(loadWeightInputs);
     useEffect(() => {
@@ -475,7 +475,7 @@ export function SavedIpList() {
                 item.sceneName,
                 typeof item.downloadMbps === 'number' && item.downloadMbps > 0 ? item.downloadMbps.toFixed(2) : '',
                 typeof item.purity?.purityScore === 'number' ? item.purity.purityScore : '',
-                item.purity ? (classifyHome(item.purity) === 'residential' ? '家宽' : classifyHome(item.purity) === 'likely' ? '家宽?' : '') : '',
+                item.purity && classifyHome(item.purity) === 'residential' ? '家宽' : '',
             ].map(field => {
                 const stringField = String(field);
                 // 如果包含逗号、引号或换行，则转义引号并用引号包裹
@@ -511,7 +511,7 @@ export function SavedIpList() {
                 const latency = `${item.latency}ms`;
                 const speedComment = typeof item.downloadMbps === 'number' && item.downloadMbps > 0 ? `|${item.downloadMbps.toFixed(2)}Mbps` : '';
                 const purityComment = typeof item.purity?.purityScore === 'number' ? `|${item.purity.purityScore}/100` : '';
-                const homeComment = item.purity ? (classifyHome(item.purity) === 'residential' ? '|家宽' : classifyHome(item.purity) === 'likely' ? '|家宽?' : '') : '';
+                const homeComment = item.purity && classifyHome(item.purity) === 'residential' ? '|家宽' : '';
                 const comment = `${regionName}|${sceneName}|${latency}${homeComment}${speedComment}${purityComment}`;
                 txtContent += `${item.ip}:${item.port}#${comment}\n`;
             }
@@ -545,7 +545,7 @@ export function SavedIpList() {
             const latency = `${item.latency}ms`;
             const speedComment = typeof item.downloadMbps === 'number' && item.downloadMbps > 0 ? `|${item.downloadMbps.toFixed(2)}Mbps` : '';
             const purityComment = typeof item.purity?.purityScore === 'number' ? `|${item.purity.purityScore}/100` : '';
-            const homeComment = item.purity ? (classifyHome(item.purity) === 'residential' ? '|家宽' : classifyHome(item.purity) === 'likely' ? '|家宽?' : '') : '';
+            const homeComment = item.purity && classifyHome(item.purity) === 'residential' ? '|家宽' : '';
             const comment = `${regionName}|${sceneName}|${latency}${homeComment}${speedComment}${purityComment}`;
             txtContent += `${item.ip}:${item.port}#${comment}\n`;
         }
@@ -650,7 +650,7 @@ export function SavedIpList() {
                         </select>
                     </label>
 
-                    <label className="flex items-center gap-1 text-xs text-gray-700 dark:text-gray-300 cursor-pointer select-none" title="根据保存时的纯净度数据判断：排除机房、VPN、代理、Tor、中继和移动网络；没有纯净度数据的不显示">
+                    <label className="flex items-center gap-1 text-xs text-gray-700 dark:text-gray-300 cursor-pointer select-none" title="根据保存时的纯净度数据判断：排除机房、VPN、代理、Tor、中继和移动网络，只保留上游明确标注为家庭宽带的；没有纯净度数据的不显示">
                         <input type="checkbox" checked={homeOnly} onChange={(e) => setHomeOnly(e.target.checked)} className="h-3.5 w-3.5 rounded border-gray-300 text-emerald-600" />
                         仅家宽
                     </label>
@@ -861,10 +861,8 @@ export function SavedIpList() {
                                     <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{item.sceneName}</td>
                                     <td className="px-4 py-2 whitespace-nowrap text-sm font-semibold text-blue-600 dark:text-blue-400">{typeof item.downloadMbps === 'number' && item.downloadMbps > 0 ? `${item.downloadMbps.toFixed(2)} Mbps` : '-'}</td>
                                     <td className="px-4 py-2 whitespace-nowrap text-sm font-semibold text-emerald-600 dark:text-emerald-400">{typeof item.purity?.purityScore === 'number' ? `${item.purity.purityScore}/100` : '-'}
-                                        {item.purity && classifyHome(item.purity) !== 'other' && (
-                                            <span className={`ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-medium ${classifyHome(item.purity) === 'residential' ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'}`}>
-                                                {classifyHome(item.purity) === 'residential' ? '家宽' : '疑似家宽'}
-                                            </span>
+                                        {item.purity && classifyHome(item.purity) === 'residential' && (
+                                            <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300">家宽</span>
                                         )}
                                     </td>
                                     <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-700 dark:text-gray-200">{compositeScore(item, scoreWeights).toFixed(1)}</td>

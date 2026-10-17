@@ -51,18 +51,11 @@ function validIp(value: string): boolean {
   return validIpv4(value) || validIpv6(value);
 }
 
-interface Env {
-  IP_KV?: KVNamespace;
-}
-
-// 纯净度结果缓存 24 小时（存放在已有的 IP_KV，key 前缀 purity:）。
-// 注意：每个新查询的 IP 会写一次 KV，免费版 KV 每天约 1000 次写入额度；
-// 请求体里传 refresh: true 可忽略缓存并重新查询。
-const CACHE_TTL_SECONDS = 24 * 3600;
-
-export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
+// 纯净度检测本身不读写 KV：结果只返回给页面，放在页面内存里（和延迟一样），
+// 用户点“保存到场景”时才随 IP 一起整体写入一次 KV，避免查一个写一个而消耗免费版每天约 1000 次的写入额度。
+export const onRequestPost: PagesFunction = async ({ request }) => {
   try {
-    const body = await request.json() as { ips?: string[]; refresh?: boolean };
+    const body = await request.json() as { ips?: string[] };
     const ips = Array.from(new Set((body.ips || [])
       .map(x => String(x).trim())
       .filter(validIp)))
@@ -77,20 +70,10 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
     // Cloudflare Workers / Pages Functions 对单次调用的子请求数量有上限。
     // 每次调用最多向上游发 20 次请求（远低于常见的 50 次上限），
-    // 并且按顺序执行。前端也是按每批 20 个发送的。
+    // 并且按顺序执行。前端按每批 5 个发送，结果逐批返回。
     const results: Record<string, unknown> = {};
     for (const ip of ips) {
       try {
-        if (!body.refresh && env.IP_KV) {
-          try {
-            const cached = await env.IP_KV.get(`purity:${ip}`, { type: 'json' });
-            if (cached && typeof cached === 'object') {
-              results[ip] = cached;
-              continue;
-            }
-          } catch { /* 缓存读取失败时直接走上游查询 */ }
-        }
-
         const upstream = await fetch(`https://api.ffraud.com/public/ip/${encodeURIComponent(ip)}`, {
           headers: { 'Accept': 'application/json' },
         });
@@ -126,11 +109,6 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
           threatTags: Array.isArray(data.threat_tags) ? data.threat_tags : [],
           confidence: data.confidence || '',
         };
-        if (env.IP_KV) {
-          try {
-            await env.IP_KV.put(`purity:${ip}`, JSON.stringify(results[ip]), { expirationTtl: CACHE_TTL_SECONDS });
-          } catch { /* 缓存写入失败（如额度用尽）不影响本次结果 */ }
-        }
       } catch {
         // 某个 IP 上游查询失败时只跳过该 IP，不能中断整批请求。
         continue;

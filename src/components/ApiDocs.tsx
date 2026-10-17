@@ -46,8 +46,8 @@ export function ApiDocs({ apiToken }: ApiDocsProps) {
                 <li><code className="break-all">max_age=时长</code>: 只要最近测试过的IP，数字默认为小时，支持 <code className="break-all">h</code>/<code className="break-all">d</code> 后缀，例如 <code className="break-all">max_age=24h</code>、<code className="break-all">max_age=7d</code>（没有测试时间的旧数据不返回，重新保存或复测后会补上）</li>
                 <li><code className="break-all">sort=排序方式</code>: <code className="break-all">latency</code>（默认）、<code className="break-all">speed</code>、<code className="break-all">purity</code>、<code className="break-all">score</code>（综合评分：延迟 40% + 下载速度 35% + 纯净度 25%，未测项按 0 计）</li>
                 <li><code className="break-all">w_latency</code> / <code className="break-all">w_speed</code> / <code className="break-all">w_purity</code>: 自定义综合评分权重（任意非负数，会自动归一化），仅 <code className="break-all">sort=score</code> 时生效，例如 <code className="break-all">w_speed=60&amp;w_latency=30&amp;w_purity=10</code>；只写其中几项时，未写的按 0 计</li>
-                <li><code className="break-all">home=1</code>: 只要家宽 IP（含“疑似家宽”）；<code className="break-all">home=strict</code> 只要上游明确标注为家宽的。需要该 IP 做过纯净度检测，没检测的不返回</li>
-                <li><code className="break-all">show_home=1</code>: 输出家宽标记（默认不输出）。家宽的 IP 会在延迟后面多一段 <code className="break-all">|家宽</code>（疑似家宽为 <code className="break-all">|家宽?</code>），需要该 IP 做过纯净度检测；和 <code className="break-all">home</code>（筛选）互相独立，可单独或一起使用</li>
+                <li><code className="break-all">home=1</code>: 只要家宽 IP（上游明确标注为家庭宽带的）。需要该 IP 做过纯净度检测，没检测的不返回</li>
+                <li><code className="break-all">show_home=1</code>: 输出家宽标记（默认不输出）。家宽的 IP 会在延迟后面多一段 <code className="break-all">|家宽</code>，需要该 IP 做过纯净度检测；和 <code className="break-all">home</code>（筛选）互相独立，可单独或一起使用</li>
                 <li><code className="break-all">format=simple</code>: 精简输出，只保留 <code className="break-all">IP:端口#地区|场景|延迟ms</code>，不追加速度和纯净度字段</li>
             </ul>
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">

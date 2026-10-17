@@ -1,14 +1,15 @@
-// 家宽判定：根据纯净度检测返回的连接类型和各类标志位，判断一个 IP 是否像家庭宽带。
+// 家宽判定：根据纯净度检测返回的连接类型和各类标志位，判断一个 IP 是否为家庭宽带。
 //
-// 结果：
-//   residential  上游明确标注为家庭 / 住宅宽带，且没有机房、VPN、代理、Tor、中继、移动网络等标志
-//   likely       上游没有给出可识别的连接类型，但各类标志位都不是机房 / 代理 / 移动，推断为“疑似家宽”
-//   other        机房、VPN、代理、Tor、中继、移动网络，或连接类型为商业 / 教育 / 政府 / 机房等
+// 判为家宽需要同时满足：
+//   1. 不是机房 / VPN / 代理 / Tor / 中继 / 移动网络（标志位都为否）
+//   2. 上游返回的连接类型明确是家庭 / 住宅宽带
+// 其余情况（包括上游没有给出连接类型）一律视为非家宽，不做“疑似”推断。
 //
-// 注意：连接类型的具体取值取决于上游接口，这里按关键词识别；识别不了时只能按标志位推断为“疑似家宽”。
+// 注意：连接类型的具体取值取决于上游接口，这里按关键词识别；
+// 如果发现明明是家宽却没被识别，可以在结果页展开纯净度详情查看“连接类型”的实际取值，再调整下面的关键词。
 // Cloudflare 自己的 IP 都是机房 IP，不会被判为家宽，这个功能主要用于自定义 IP / 反代 IP 等场景。
 
-export type HomeType = 'residential' | 'likely' | 'other';
+export type HomeType = 'residential' | 'other';
 
 export interface HomeInfo {
     connectionType?: string;
@@ -28,12 +29,9 @@ export function classifyHome(p: HomeInfo | null | undefined): HomeType {
     if (p.isDatacenter || p.vpn || p.proxy || p.tor || p.relay || p.mobile) return 'other';
     const type = String(p.connectionType || '');
     if (NOT_HOME_TYPE.test(type)) return 'other';
-    if (HOME_TYPE.test(type)) return 'residential';
-    return 'likely';
+    return HOME_TYPE.test(type) ? 'residential' : 'other';
 }
 
-/** strict=true 时只接受“确认家宽”，否则连“疑似家宽”也算 */
-export function isHome(p: HomeInfo | null | undefined, strict = false): boolean {
-    const t = classifyHome(p);
-    return strict ? t === 'residential' : t !== 'other';
+export function isHome(p: HomeInfo | null | undefined): boolean {
+    return classifyHome(p) === 'residential';
 }

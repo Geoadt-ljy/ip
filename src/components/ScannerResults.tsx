@@ -21,13 +21,12 @@ interface IpScannerResultsAndSaveProps {
 const DEFAULT_IPS_PER_REGION = 20;
 
 export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: IpScannerResultsAndSaveProps) {
-    const [purityForceRefresh, setPurityForceRefresh] = useState(false);
     const [ipsPerRegion, setIpsPerRegion] = useState<string>(String(DEFAULT_IPS_PER_REGION));
     const [isLatencyFilterEnabled, setIsLatencyFilterEnabled] = useState(false);
     const [isDownloadFilterEnabled, setIsDownloadFilterEnabled] = useState(false);
     const [downloadFilterValue, setDownloadFilterValue] = useState<string>('10');
     const [isPurityFilterEnabled, setIsPurityFilterEnabled] = useState(false);
-    const [isHomeFilterEnabled, setIsHomeFilterEnabled] = useState(false); // 仅保留家宽（含疑似），需要先检测纯净度
+    const [isHomeFilterEnabled, setIsHomeFilterEnabled] = useState(false); // 仅保留家宽，需要先检测纯净度
     const [purityFilterValue, setPurityFilterValue] = useState<string>('90');
     const [isPacketLossFilterEnabled, setIsPacketLossFilterEnabled] = useState(false);
     const [packetLossFilterValue, setPacketLossFilterValue] = useState<string>('10');
@@ -57,6 +56,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
     const [purityFailed, setPurityFailed] = useState<Record<string, true>>({});
     // 用于“强行中断”：持有当前运行中的测速 / 纯净度检测的 AbortController
     const speedAbortRef = useRef<AbortController | null>(null);
+    const packetLossAbortRef = useRef<AbortController | null>(null);
     const purityAbortRef = useRef<AbortController | null>(null);
     const [packetLossMap, setPacketLossMap] = useState<Record<string, { packetLoss: number; sent: number; received: number; error?: string }>>({});
     const [isPacketLossTesting, setIsPacketLossTesting] = useState(false);
@@ -98,6 +98,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         // 结果集变化时，先中断仍在运行的测速 / 纯净度检测，避免旧任务写入新结果
         speedAbortRef.current?.abort();
         purityAbortRef.current?.abort();
+        packetLossAbortRef.current?.abort();
         setSelectedSpeedTargets(new Set());
         setBrowserSpeedMap({});
         setBrowserSpeedErrors({});
@@ -112,6 +113,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
     useEffect(() => () => {
         speedAbortRef.current?.abort();
         purityAbortRef.current?.abort();
+        packetLossAbortRef.current?.abort();
     }, []);
 
     // 点击下拉外部时关闭场景选择浮层
@@ -334,6 +336,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
     const abortAllTests = () => {
         speedAbortRef.current?.abort();
         purityAbortRef.current?.abort();
+        packetLossAbortRef.current?.abort();
     };
 
     const handleCombinedSpeedPurityTest = async () => {
@@ -354,28 +357,40 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
             showToast('请先勾选一个或多个 IPv4 IP', 'warning');
             return;
         }
+        const controller = new AbortController();
+        packetLossAbortRef.current = controller;
+        const signal = controller.signal;
         setIsPacketLossTesting(true);
         setPacketLossDone(0);
+        let done = 0;
         try {
             const queue = [...targets];
-            let done = 0;
             const worker = async () => {
-                while (queue.length) {
+                while (queue.length > 0 && !signal.aborted) {
                     const target = queue.shift();
                     if (!target) return;
                     const key = speedKey(target);
-                    const result = await testBrowserPacketLoss(target.ip, target.port, { attempts: 10, timeoutMs: 3000, urlTemplate: packetLossUrlTemplate });
+                    const result = await testBrowserPacketLoss(target.ip, target.port, { attempts: 10, timeoutMs: 3000, urlTemplate: packetLossUrlTemplate, signal });
+                    // 被中断的目标探测不完整，丢包率不可信，不记录结果
+                    if (result.aborted) return;
                     setPacketLossMap(prev => ({ ...prev, [key]: result }));
                     done++;
                     setPacketLossDone(done);
                 }
             };
             await Promise.all(Array.from({ length: Math.min(3, targets.length) }, () => worker()));
-            showToast(`HTTPS 探测丢包测试完成：${done} 个 IP`, 'success');
+            if (signal.aborted) {
+                showToast(`已中断丢包测试：已完成 ${done}/${targets.length} 个 IP`, 'warning');
+            } else {
+                showToast(`HTTPS 探测丢包测试完成：${done} 个 IP`, 'success');
+            }
         } finally {
             setIsPacketLossTesting(false);
+            if (packetLossAbortRef.current === controller) packetLossAbortRef.current = null;
         }
     };
+
+    const abortPacketLoss = () => packetLossAbortRef.current?.abort();
 
     const handlePurity = async () => {
         const ips = Array.from(new Set(filteredResults.filter(r => !r.domain && selectedSpeedTargets.has(speedKey(r))).map(r => r.ip)));
@@ -409,7 +424,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                     const batch = batches.shift();
                     if (!batch) return;
                     try {
-                        const data = await checkPurity(batch, signal, purityForceRefresh);
+                        const data = await checkPurity(batch, signal);
                         okCount += Object.keys(data).length;
                         setPurityMap(prev => ({ ...prev, ...data }));
                         const missing = batch.filter(ip => !data[ip]);
@@ -507,10 +522,6 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                             <div className="flex items-center gap-4 flex-wrap">
                                 <h3 className="text-sm font-bold text-gray-700 dark:text-gray-200">筛选与操作（勾选项共用于测速、纯净度检测和 KV 保存）:</h3>
                                 <button onClick={() => void handlePurity()} disabled={isCheckingPurity || selectedVisibleSpeedKeys.length === 0} className="px-3 py-1 text-xs font-medium rounded-full bg-emerald-100 text-emerald-700 hover:bg-emerald-200 disabled:opacity-50 dark:bg-emerald-900/40 dark:text-emerald-300">{isCheckingPurity ? `检测中 ${purityDone}/${purityTotal}` : `检测勾选项纯净度 (${selectedVisibleSpeedKeys.length})`}</button>
-                                <label className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 cursor-pointer select-none" title="默认复用 24 小时内的检测结果，勾选后重新向上游查询">
-                                    <input type="checkbox" checked={purityForceRefresh} onChange={(e) => setPurityForceRefresh(e.target.checked)} disabled={isCheckingPurity} className="h-3.5 w-3.5 rounded border-gray-300 text-emerald-600" />
-                                    忽略缓存
-                                </label>
                                 <button onClick={() => void handleBrowserSpeedTest()} disabled={isBrowserSpeedTesting || selectedVisibleSpeedKeys.length === 0} className="px-3 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-700 hover:bg-blue-200 disabled:opacity-50 dark:bg-blue-900/40 dark:text-blue-300">{isBrowserSpeedTesting ? `测速中 ${browserSpeedDone}/${browserSpeedTotal}` : `浏览器测速 (${selectedVisibleSpeedKeys.length})`}</button>
                                 <button onClick={() => void handleCombinedSpeedPurityTest()} disabled={isBrowserSpeedTesting || isCheckingPurity || selectedVisibleSpeedKeys.length === 0} className="px-3 py-1 text-xs font-medium rounded-full bg-violet-100 text-violet-700 hover:bg-violet-200 disabled:opacity-50 dark:bg-violet-900/40 dark:text-violet-300">一键测速 + 纯净度</button>
                                 {isBrowserSpeedTesting && (
@@ -519,10 +530,13 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                                 {isCheckingPurity && (
                                     <button onClick={abortPurityCheck} title="立即中止纯净度检测请求" className="px-3 py-1 text-xs font-medium rounded-full bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/40 dark:text-red-300">■ 中断纯净度</button>
                                 )}
-                                {isBrowserSpeedTesting && isCheckingPurity && (
-                                    <button onClick={abortAllTests} title="同时中止下载测速和纯净度检测" className="px-3 py-1 text-xs font-bold rounded-full bg-red-600 text-white hover:bg-red-700">■ 强行中断全部</button>
+                                {[isBrowserSpeedTesting, isCheckingPurity, isPacketLossTesting].filter(Boolean).length >= 2 && (
+                                    <button onClick={abortAllTests} title="同时中止正在运行的下载测速、纯净度检测和丢包测试" className="px-3 py-1 text-xs font-bold rounded-full bg-red-600 text-white hover:bg-red-700">■ 强行中断全部</button>
                                 )}
                                 <button onClick={() => void handlePacketLossTest()} disabled={isPacketLossTesting || selectedVisibleSpeedKeys.length === 0} title="每个 IP 发送 10 次 HTTPS 探测；这不是 ICMP ping" className="px-3 py-1 text-xs font-medium rounded-full bg-amber-100 text-amber-800 hover:bg-amber-200 disabled:opacity-50 dark:bg-amber-900/40 dark:text-amber-300">{isPacketLossTesting ? `丢包测试 ${packetLossDone}/${selectedVisibleSpeedKeys.length}` : `丢包率测试 (${selectedVisibleSpeedKeys.length})`}</button>
+                                {isPacketLossTesting && (
+                                    <button onClick={abortPacketLoss} title="立即中止丢包测试" className="px-3 py-1 text-xs font-medium rounded-full bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/40 dark:text-red-300">■ 中断丢包测试</button>
+                                )}
                                 <button onClick={() => { setBrowserSpeedMap({}); setBrowserSpeedErrors({}); setPacketLossMap({}); setSelectedSpeedTargets(new Set()); }} disabled={isBrowserSpeedTesting || (Object.keys(browserSpeedMap).length === 0 && Object.keys(browserSpeedErrors).length === 0 && Object.keys(packetLossMap).length === 0)} className="px-3 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-600 dark:text-gray-200 dark:hover:bg-gray-500">清除测速结果</button>
                                 <div className="flex items-center gap-2 flex-wrap">
                                     <label htmlFor="download-test-address" className="text-xs text-gray-600 dark:text-gray-300">下载测速地址</label>
@@ -605,7 +619,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                                         onChange={(e) => setIsHomeFilterEnabled(e.target.checked)}
                                         className="h-4 w-4 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
                                     />
-                                    <label htmlFor="home-filter-enable" className="text-sm text-gray-600 dark:text-gray-300 cursor-pointer select-none" title="根据纯净度检测结果判断：排除机房、VPN、代理、Tor、中继和移动网络；上游没给出连接类型时按“疑似家宽”处理">仅家宽</label>
+                                    <label htmlFor="home-filter-enable" className="text-sm text-gray-600 dark:text-gray-300 cursor-pointer select-none" title="根据纯净度检测结果判断：排除机房、VPN、代理、Tor、中继和移动网络；只有上游明确标注为家庭宽带的才算">仅家宽</label>
                                     {isHomeFilterEnabled && Object.keys(purityMap).length === 0 && <span className="text-amber-600 dark:text-amber-400 text-xs">请先检测纯净度</span>}
                                 </div>
                                 <div className="flex items-center gap-2">
@@ -804,10 +818,8 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                                             <td className="px-6 py-4 whitespace-nowrap text-sm">
                                                 <div className="flex items-center gap-2">
                                                     {purity ? <span className={purity.purityScore >= 90 ? 'text-green-600 dark:text-green-400' : purity.purityScore >= 70 ? 'text-yellow-600 dark:text-yellow-400' : 'text-red-600 dark:text-red-400'}>{purity.purityScore} / 100</span> : (purityFailed[ip] ? <span className="text-red-500" title="检测失败或上游无结果">失败</span> : purityPending[ip] ? <span className="text-gray-400 animate-pulse">检测中…</span> : '-')}
-                                                    {purity && classifyHome(purity) !== 'other' && (
-                                                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${classifyHome(purity) === 'residential' ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'}`} title={classifyHome(purity) === 'residential' ? '上游标注为家庭宽带' : '上游没有给出明确的连接类型，按标志位推断为家宽'}>
-                                                            {classifyHome(purity) === 'residential' ? '家宽' : '疑似家宽'}
-                                                        </span>
+                                                    {purity && classifyHome(purity) === 'residential' && (
+                                                        <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300" title="上游标注为家庭宽带">家宽</span>
                                                     )}
                                                     {purity && (
                                                         <button type="button" title="查看纯净度详情" onClick={() => setExpandedPurityIp(expanded ? null : `${ip}:${port}`)} className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-500 dark:text-gray-300">
@@ -832,7 +844,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                                                             <div><span className="text-gray-500 dark:text-gray-400">Proxy：</span><b className="font-semibold text-gray-800 dark:text-gray-100">{purity.proxy ? '是' : '否'}</b></div>
                                                             <div><span className="text-gray-500 dark:text-gray-400">Tor：</span><b className="font-semibold text-gray-800 dark:text-gray-100">{purity.tor ? '是' : '否'}</b></div>
                                                             <div><span className="text-gray-500 dark:text-gray-400">连接类型：</span><b className="font-semibold text-gray-800 dark:text-gray-100">{purity.connectionType || '-'}</b></div>
-                                                            <div><span className="text-gray-500 dark:text-gray-400">家宽判定：</span><b className="font-semibold text-gray-800 dark:text-gray-100">{classifyHome(purity) === 'residential' ? '家宽' : classifyHome(purity) === 'likely' ? '疑似家宽' : '非家宽'}</b></div>
+                                                            <div><span className="text-gray-500 dark:text-gray-400">家宽判定：</span><b className="font-semibold text-gray-800 dark:text-gray-100">{classifyHome(purity) === 'residential' ? '家宽' : '非家宽'}</b></div>
                                                             <div><span className="text-gray-500 dark:text-gray-400">Relay：</span><b className="font-semibold text-gray-800 dark:text-gray-100">{purity.relay ? '是' : '否'}</b></div>
                                                             <div><span className="text-gray-500 dark:text-gray-400">数据中心：</span><b className="font-semibold text-gray-800 dark:text-gray-100">{purity.isDatacenter ? '是' : '否'}</b></div>
                                                             <div><span className="text-gray-500 dark:text-gray-400">移动网络：</span><b className="font-semibold text-gray-800 dark:text-gray-100">{purity.mobile ? '是' : '否'}</b></div>

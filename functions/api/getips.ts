@@ -1,6 +1,6 @@
 import { timingSafeEqual } from '../_lib/auth';
 import { compositeScore, normalizeWeights, DEFAULT_SCORE_WEIGHTS, type ScoreWeights } from '../_lib/score';
-import { isHome, classifyHome } from '../_lib/residential';
+import { isHome } from '../_lib/residential';
 
 interface Env {
     IP_KV: KVNamespace;
@@ -100,11 +100,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         ? normalizeWeights({ latency: Number(wLatency ?? 0), speed: Number(wSpeed ?? 0), purity: Number(wPurity ?? 0) })
         : { ...DEFAULT_SCORE_WEIGHTS };
 
-    // 家宽筛选：home=1 保留“家宽 + 疑似家宽”，home=strict 只保留确认的家宽；需要该 IP 做过纯净度检测
+    // 家宽筛选：home=1 只保留家宽（home=strict 为兼容旧写法，效果相同）；需要该 IP 做过纯净度检测
     const homeParam = (url.searchParams.get('home') || '').toLowerCase();
-    const homeMode: 'off' | 'any' | 'strict' = homeParam === 'strict' ? 'strict' : (homeParam === '1' || homeParam === 'true') ? 'any' : 'off';
+    const homeFilter = ['1', 'true', 'strict'].includes(homeParam);
 
-    // 输出家宽标记（默认不输出）：show_home=1 时，家宽 / 疑似家宽的 IP 在延迟后面追加 |家宽 或 |家宽?（疑似家宽）
+    // 输出家宽标记（默认不输出）：show_home=1 时，家宽 IP 在延迟后面追加 |家宽
     const showHome = ['1', 'true'].includes((url.searchParams.get('show_home') || '').toLowerCase());
 
     const minSpeed = minSpeedParam !== null && minSpeedParam !== '' ? Number(minSpeedParam) : NaN;
@@ -163,8 +163,8 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
             }
 
             // 家宽：没有纯净度数据的 IP 无法判断，视为不满足
-            if (homeMode !== 'off') {
-                data = data.filter(item => item.purity && isHome(item.purity, homeMode === 'strict'));
+            if (homeFilter) {
+                data = data.filter(item => item.purity && isHome(item.purity));
             }
 
             // 数据新鲜度：没有记录测试时间（testedAt）的旧数据视为不满足，重新保存一次即可补上
@@ -206,11 +206,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
             const alias = `${region}|${item.sceneName}`;
             let line = `${item.ip}:${item.port}#${alias}|${item.latency}ms`;
 
-            // 家宽标记（可选）：只有做过纯净度检测、且判为家宽 / 疑似家宽的才输出，紧跟在延迟之后
-            if (showHome && item.purity) {
-                const home = classifyHome(item.purity);
-                if (home === 'residential') line += '|家宽';
-                else if (home === 'likely') line += '|家宽?';
+            // 家宽标记（可选）：只有做过纯净度检测、且判为家宽的才输出，紧跟在延迟之后
+            if (showHome && item.purity && isHome(item.purity)) {
+                line += '|家宽';
             }
 
             if (simpleFormat) return line;

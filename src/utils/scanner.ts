@@ -359,8 +359,8 @@ export async function testBrowserDownloadSpeed(
 export async function testBrowserPacketLoss(
     ip: string,
     port: number,
-    options: { attempts?: number; timeoutMs?: number; urlTemplate?: string } = {},
-): Promise<{ packetLoss: number; sent: number; received: number; error?: string }> {
+    options: { attempts?: number; timeoutMs?: number; urlTemplate?: string; signal?: AbortSignal } = {},
+): Promise<{ packetLoss: number; sent: number; received: number; error?: string; aborted?: boolean }> {
     if (isIPv6(ip) || isDomainName(ip)) {
         return { packetLoss: 100, sent: 0, received: 0, error: '浏览器丢包测试目前仅支持 IPv4 IP' };
     }
@@ -382,10 +382,15 @@ export async function testBrowserPacketLoss(
     if (parsedUrl.protocol !== 'https:') {
         return { packetLoss: 100, sent: 0, received: 0, error: '浏览器丢包检测地址必须使用 HTTPS' };
     }
+    // 被用户中断时探测不完整，得出的丢包率不可信，所以返回 aborted，由调用方丢弃该结果
+    const abortedResult = (sent: number, got: number) => ({ packetLoss: 100, sent, received: got, error: '已中断', aborted: true });
     let received = 0;
     for (let i = 0; i < attempts; i++) {
+        if (options.signal?.aborted) return abortedResult(i, received);
         const controller = new AbortController();
         const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+        const onExternalAbort = () => controller.abort();
+        options.signal?.addEventListener('abort', onExternalAbort, { once: true });
         try {
             const response = await fetch(`${urlBase}?packet_probe=${Date.now()}_${i}_${Math.random().toString(36).slice(2)}`, {
                 method: 'GET', mode: 'no-cors', cache: 'no-store', credentials: 'omit', signal: controller.signal,
@@ -395,9 +400,11 @@ export async function testBrowserPacketLoss(
         } catch {
             // DNS、TLS、连接失败或超时，均计为探测丢失。
         } finally {
+            options.signal?.removeEventListener('abort', onExternalAbort);
             window.clearTimeout(timer);
         }
     }
+    if (options.signal?.aborted) return abortedResult(attempts, received);
     return { packetLoss: Number((((attempts - received) / attempts) * 100).toFixed(1)), sent: attempts, received };
 }
 
