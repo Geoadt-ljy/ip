@@ -300,44 +300,6 @@ function isDomainName(host: string): boolean {
 }
 
 
-export interface PurityResult {
-    purityScore: number;
-    purityLabel: string;
-    fraudScore: number;
-    risk: string;
-    reason: string;
-    vpn: boolean;
-    mobile: boolean;
-    proxy: boolean;
-    tor: boolean;
-    relay: boolean;
-    isDatacenter: boolean;
-    isAbuser: boolean;
-    recentAbuse: boolean;
-    residentialProxy: boolean;
-    connectionType: string;
-    country: string;
-    region: string;
-    city: string;
-    company: string;
-    isp: string;
-    organization: string;
-    asn: string;
-    threatTags: string[];
-    confidence: string;
-}
-
-export async function checkPurity(ips: string[], signal?: AbortSignal): Promise<Record<string, PurityResult>> {
-    const response = await authedFetch('/api/purity', {
-        method: 'POST',
-        signal,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ips }),
-    });
-    const data = await handleResponse<{ results: Record<string, PurityResult> }>(response);
-    return data?.results || {};
-}
-
 /** 删除整个分组（场景）及其中所有 IP */
 export async function deleteScene(name: string): Promise<void> {
     const response = await authedFetch(`/api/results?scene=${encodeURIComponent(name)}`, { method: 'DELETE' });

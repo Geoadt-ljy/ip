@@ -1,6 +1,5 @@
 import { timingSafeEqual } from '../_lib/auth';
 import { compositeScore, normalizeWeights, DEFAULT_SCORE_WEIGHTS, type ScoreWeights } from '../_lib/score';
-import { isHome } from '../_lib/residential';
 
 interface Env {
     IP_KV: KVNamespace;
@@ -86,29 +85,19 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const countParam = url.searchParams.get('count');
     // 新增筛选/排序/格式参数（均可选；数值无效时忽略该参数，与原有参数的处理方式一致）
     const minSpeedParam = url.searchParams.get('min_speed');     // 下载速度下限（Mbps）
-    const minPurityParam = url.searchParams.get('min_purity');   // 纯净度下限（0-100）
     const maxAgeParam = url.searchParams.get('max_age');         // 数据新鲜度：数字默认为小时，支持 h/d 后缀，如 12h、7d
-    const sortParam = (url.searchParams.get('sort') || '').toLowerCase(); // latency(默认) | speed | purity | score
-    const formatParam = (url.searchParams.get('format') || '').toLowerCase(); // simple：不追加速度/纯净度字段
+    const sortParam = (url.searchParams.get('sort') || '').toLowerCase(); // latency(默认) | speed | score
+    const formatParam = (url.searchParams.get('format') || '').toLowerCase(); // simple：不追加下载速度字段
     const simpleFormat = formatParam === 'simple' || url.searchParams.get('simple') === '1';
 
     // 自定义综合评分权重：任意非负数（会自动归一化）；只写其中几项时，未写的按 0 计；都不写则用默认权重
     const wLatency = url.searchParams.get('w_latency');
     const wSpeed = url.searchParams.get('w_speed');
-    const wPurity = url.searchParams.get('w_purity');
-    const weights: ScoreWeights = (wLatency !== null || wSpeed !== null || wPurity !== null)
-        ? normalizeWeights({ latency: Number(wLatency ?? 0), speed: Number(wSpeed ?? 0), purity: Number(wPurity ?? 0) })
+    const weights: ScoreWeights = (wLatency !== null || wSpeed !== null)
+        ? normalizeWeights({ latency: Number(wLatency ?? 0), speed: Number(wSpeed ?? 0) })
         : { ...DEFAULT_SCORE_WEIGHTS };
 
-    // 家宽筛选：home=1 只保留家宽（home=strict 为兼容旧写法，效果相同）；需要该 IP 做过纯净度检测
-    const homeParam = (url.searchParams.get('home') || '').toLowerCase();
-    const homeFilter = ['1', 'true', 'strict'].includes(homeParam);
-
-    // 输出家宽标记（默认不输出）：show_home=1 时，家宽 IP 在延迟后面追加 |家宽
-    const showHome = ['1', 'true'].includes((url.searchParams.get('show_home') || '').toLowerCase());
-
     const minSpeed = minSpeedParam !== null && minSpeedParam !== '' ? Number(minSpeedParam) : NaN;
-    const minPurity = minPurityParam !== null && minPurityParam !== '' ? Number(minPurityParam) : NaN;
     let maxAgeMs = NaN;
     if (maxAgeParam) {
         const m = /^(\d+(?:\.\d+)?)\s*([hd]?)$/i.exec(maxAgeParam.trim());
@@ -157,16 +146,6 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
                 data = data.filter(item => Number(item.downloadMbps) >= minSpeed);
             }
 
-            // 纯净度下限：未检测的 IP 视为不满足
-            if (Number.isFinite(minPurity)) {
-                data = data.filter(item => typeof item.purity?.purityScore === 'number' && item.purity.purityScore >= minPurity);
-            }
-
-            // 家宽：没有纯净度数据的 IP 无法判断，视为不满足
-            if (homeFilter) {
-                data = data.filter(item => item.purity && isHome(item.purity));
-            }
-
             // 数据新鲜度：没有记录测试时间（testedAt）的旧数据视为不满足，重新保存一次即可补上
             if (Number.isFinite(maxAgeMs)) {
                 const now = Date.now();
@@ -180,13 +159,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
         const resultsByScene = await Promise.all(fetchPromises);
         let allItems = resultsByScene.flat();
 
-        // 排序：默认按延迟；sort=speed/purity/score 时按对应指标从高到低，延迟低者优先作为次级排序
+        // 排序：默认按延迟；sort=speed/score 时按对应指标从高到低，延迟低者优先作为次级排序
         const byLatency = (a: any, b: any) => a.latency - b.latency;
         const num = (v: unknown) => { const n = Number(v); return Number.isFinite(n) ? n : -1; };
         if (sortParam === 'speed') {
             allItems.sort((a, b) => num(b.downloadMbps) - num(a.downloadMbps) || byLatency(a, b));
-        } else if (sortParam === 'purity') {
-            allItems.sort((a, b) => num(b.purity?.purityScore) - num(a.purity?.purityScore) || byLatency(a, b));
         } else if (sortParam === 'score') {
             allItems.sort((a, b) => compositeScore(b, weights) - compositeScore(a, weights) || byLatency(a, b));
         } else {
@@ -206,21 +183,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
             const alias = `${region}|${item.sceneName}`;
             let line = `${item.ip}:${item.port}#${alias}|${item.latency}ms`;
 
-            // 家宽标记（可选）：只有做过纯净度检测、且判为家宽的才输出，紧跟在延迟之后
-            if (showHome && item.purity && isHome(item.purity)) {
-                line += '|家宽';
-            }
-
             if (simpleFormat) return line;
 
             const speed = Number(item.downloadMbps);
             if (Number.isFinite(speed) && speed > 0) {
                 line += `|${speed.toFixed(2)}Mbps`;
-            }
-
-            const purityScore = item.purity?.purityScore;
-            if (typeof purityScore === 'number' && Number.isFinite(purityScore) && purityScore >= 0 && purityScore <= 100) {
-                line += `|${purityScore}/100`;
             }
 
             return line;

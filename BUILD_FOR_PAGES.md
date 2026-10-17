@@ -22,7 +22,6 @@
 - 下载测速地址可配置
 - 下载测速时长可配置
 - 复用现有并发线程
-- FFraud 纯净度参考检测（通过 Pages Function）
 
 默认下载测速地址：
 `https://speed.cloudflare.com/__down?bytes=200000000`
