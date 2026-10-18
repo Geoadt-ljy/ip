@@ -7,9 +7,10 @@
 //   104.16.1.1:443#备注        “#”及之后的备注会被忽略（本系统导出的 TXT 就是这种格式）
 //   以逗号 / 分号 / Tab 分隔的 CSV：若有表头“IP/IP地址/地址/host/域名”和“端口/port”，按表头取列；
 //   没有表头时取第一列为地址，第二列是 1-65535 的整数时视为端口（本系统导出的 CSV 可直接导入）
-// 不支持（计入“已忽略”）：CIDR 网段（如 1.0.0.0/24）、IPv6。
+//   104.16.0.0/20             IPv4 网段（CIDR，前缀 8-32），测速前会从中随机抽样 IP
+// 不支持（计入“已忽略”）：IPv6。
 
-import { isDomainName } from './scanner';
+import { isDomainName, isIpv4Cidr } from './scanner';
 
 export const MAX_IMPORT_TARGETS = 20000;
 
@@ -24,6 +25,7 @@ const IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)
 function normalizeTarget(raw: string): string | null {
     const token = raw.trim().replace(/^["']+|["']+$/g, '');
     if (!token) return null;
+    if (token.includes('/')) return isIpv4Cidr(token) ? token : null; // CIDR 网段原样保留
 
     const colonCount = (token.match(/:/g) || []).length;
     if (colonCount > 1 || token.includes('[')) return null; // IPv6 暂不支持

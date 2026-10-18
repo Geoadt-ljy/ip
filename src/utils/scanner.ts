@@ -564,6 +564,17 @@ export class BatchScanner {
     }
 }
 
+
+const CIDR_RE = /^((?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d))\/(\d{1,2})$/;
+
+/** 是否为合法的 IPv4 CIDR 网段（前缀长度 8-32，如 104.16.0.0/20） */
+export function isIpv4Cidr(text: string): boolean {
+    const m = CIDR_RE.exec(text.trim());
+    if (!m) return false;
+    const prefix = Number(m[2]);
+    return prefix >= 8 && prefix <= 32;
+}
+
 /**
  * 从 CIDR 块生成随机 IP
  */
@@ -587,6 +598,47 @@ function generateRandomIPFromCIDR(cidr: string): string {
         (randomIPInt >>> 8) & 0xFF,
         randomIPInt & 0xFF
     ].join('.');
+}
+
+
+/** 网段内可测试的主机数量（前缀 <=30 时去掉网络地址和广播地址） */
+export function cidrHostCount(cidr: string): number {
+    const prefix = Number(cidr.split('/')[1]);
+    const size = 2 ** (32 - prefix);
+    return size > 2 ? size - 2 : size;
+}
+
+/**
+ * 展开多个网段内的全部 IP。总数超过 limit 时，从全部地址中均匀随机抽取 limit 个。
+ */
+export function expandAllCidrs(cidrs: string[], limit: number): { ips: string[]; total: number; truncated: boolean } {
+    const items = cidrs.map(c => {
+        const [base, pre] = c.split('/');
+        const prefix = Number(pre);
+        const size = 2 ** (32 - prefix);
+        const baseInt = Math.floor(base.split('.').reduce((a, b) => a * 256 + Number(b), 0) / size) * size;
+        const skip = size > 2 ? 1 : 0;
+        return { baseInt: baseInt + skip, count: cidrHostCount(c) };
+    });
+    const total = items.reduce((a, b) => a + b.count, 0);
+    const toIp = (n: number) => [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.');
+    const result = new Set<string>();
+
+    if (total <= limit) {
+        for (const it of items) for (let i = 0; i < it.count; i++) result.add(toIp(it.baseInt + i));
+        return { ips: Array.from(result), total, truncated: false };
+    }
+    const starts: number[] = [];
+    let acc = 0;
+    for (const it of items) { starts.push(acc); acc += it.count; }
+    const picked = new Set<number>();
+    while (picked.size < limit) picked.add(Math.floor(Math.random() * total));
+    for (const idx of picked) {
+        let k = starts.length - 1;
+        while (starts[k] > idx) k--;
+        result.add(toIp(items[k].baseInt + (idx - starts[k])));
+    }
+    return { ips: Array.from(result), total, truncated: true };
 }
 
 /**

@@ -16,6 +16,9 @@ import {
     ScanResult,
     CF_CIDR_LIST,
     isDomainName,
+    isIpv4Cidr,
+    expandAllCidrs,
+    cidrHostCount,
     resolveDomainToIp,
     probeBrowserAvailable,
 } from '../utils/scanner';
@@ -46,6 +49,7 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
     const [selectedPort, setSelectedPort] = useState(443);
     const [ipSource, setIpSource] = useState<'cf' | 'cm' | 'third' | 'custom'>('cf');
     const [customIps, setCustomIps] = useState('');
+    const [fullCidr, setFullCidr] = useState(false); // 自定义网段：测试网段内全部 IP
     const customFileRef = useRef<HTMLInputElement | null>(null);
     const [isScanning, setIsScanning] = useState(false);
     const [progress, setProgress] = useState(0);
@@ -210,7 +214,7 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
             const merged = Array.from(new Set([...existing, ...parsed.targets])).slice(0, MAX_IMPORT_TARGETS);
             setCustomIps(merged.join('\n'));
             const notes: string[] = [];
-            if (parsed.ignored > 0) notes.push(`忽略 ${parsed.ignored} 项无法识别的内容（如 CIDR 网段、IPv6）`);
+            if (parsed.ignored > 0) notes.push(`忽略 ${parsed.ignored} 项无法识别的内容（如 IPv6）`);
             if (parsed.truncated || merged.length >= MAX_IMPORT_TARGETS) notes.push(`数量超过 ${MAX_IMPORT_TARGETS} 个上限，多余部分已截断`);
             showToast(`已导入 ${parsed.targets.length} 个目标，当前共 ${merged.length} 个${notes.length ? '；' + notes.join('；') : ''}`, notes.length ? 'warning' : 'success');
         } catch {
@@ -233,7 +237,27 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
                 showToast('请输入至少一个 IP 或 IP:端口', 'warning');
                 return null;
             }
-            return { targets: Array.from(new Set(targets)) };
+            // IP 段（CIDR）按“随机IP数量”从所有网段中随机抽样展开，其余目标原样保留
+            const cidrs = targets.filter(isIpv4Cidr);
+            const plain = targets.filter(t => !t.includes('/'));
+            const bad = targets.length - cidrs.length - plain.length;
+            if (bad > 0) showToast(`有 ${bad} 项无法识别（网段前缀需在 8-32 之间），已忽略`, 'warning');
+            let expanded: string[] = [];
+            if (cidrs.length > 0) {
+                if (fullCidr) {
+                    const r = expandAllCidrs(cidrs, MAX_IMPORT_TARGETS);
+                    expanded = r.ips;
+                    if (r.truncated) showToast(`网段内共 ${r.total} 个 IP，超过 ${MAX_IMPORT_TARGETS} 上限，已随机抽取 ${MAX_IMPORT_TARGETS} 个`, 'warning');
+                } else {
+                    expanded = generateRandomIps(cidrs, countNum);
+                }
+            }
+            const finalTargets = Array.from(new Set([...plain, ...expanded]));
+            if (finalTargets.length === 0) {
+                showToast('没有可测试的目标，请检查输入', 'warning');
+                return null;
+            }
+            return { targets: finalTargets };
         }
 
         if (ipSource === 'third') {
@@ -632,12 +656,12 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
             {ipSource === 'custom' && (
                 <div className="mb-4">
                     <div className="flex flex-wrap items-center gap-2 mb-1">
-                        <label htmlFor="custom-ips" className="text-gray-700 dark:text-gray-300 text-sm font-bold">自定义 IP（每行一个，也支持 IP:端口）:</label>
+                        <label htmlFor="custom-ips" className="text-gray-700 dark:text-gray-300 text-sm font-bold">自定义 IP（每行一个，支持 IP、IP:端口、IP段如 104.16.0.0/20）:</label>
                         <button
                             type="button"
                             onClick={() => customFileRef.current?.click()}
                             disabled={isScanning || isPreparing}
-                            title="支持 txt / csv：每行一个 IP、IP:端口或域名，可带 # 备注；CSV 可带 IP 和端口列（本系统导出的文件可直接导入）"
+                            title="支持 txt / csv：每行一个 IP、IP:端口、域名或 IP 段（CIDR），可带 # 备注；CSV 可带 IP 和端口列（本系统导出的文件可直接导入）"
                             className="px-3 py-1 text-xs font-medium rounded-full bg-blue-100 text-blue-800 hover:bg-blue-200 disabled:opacity-50 dark:bg-blue-900/40 dark:text-blue-300"
                         >
                             <Upload className="w-3.5 h-3.5 mr-1 inline-block" />
@@ -654,7 +678,17 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
                         <span className="text-xs text-gray-400">已填 {customIps.split(/[\s,，]+/).filter(Boolean).length} 个</span>
                         <input ref={customFileRef} type="file" accept=".txt,.csv,text/plain,text/csv" onChange={(e) => void handleCustomFile(e)} className="hidden" />
                     </div>
-                    <textarea id="custom-ips" value={customIps} onChange={(e) => setCustomIps(e.target.value)} disabled={isScanning || isPreparing} rows={5} className="w-full border rounded p-3 font-mono text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white" placeholder="104.16.1.1\n104.17.2.2:443\n1.1.1.1" />
+                    <textarea id="custom-ips" value={customIps} onChange={(e) => setCustomIps(e.target.value)} disabled={isScanning || isPreparing} rows={5} className="w-full border rounded p-3 font-mono text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white" placeholder="104.16.1.1\n104.17.2.2:443\n104.16.0.0/20\n172.67.64.0/20" />
+                    <label className="mt-2 flex flex-wrap items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                        <input type="checkbox" checked={fullCidr} onChange={(e) => setFullCidr(e.target.checked)} disabled={isScanning || isPreparing} />
+                        <span>测试网段内全部 IP（不勾选则按“随机IP数量”抽样）</span>
+                        {(() => {
+                            const cs = customIps.split(/[\s,，]+/).map(x => x.trim()).filter(isIpv4Cidr);
+                            if (!fullCidr || cs.length === 0) return null;
+                            const n = cs.reduce((a, c) => a + cidrHostCount(c), 0);
+                            return <span className={n > MAX_IMPORT_TARGETS ? 'text-xs text-amber-500' : 'text-xs text-gray-400'}>共 {n} 个{n > MAX_IMPORT_TARGETS ? `，超过上限将随机抽 ${MAX_IMPORT_TARGETS} 个` : ''}</span>;
+                        })()}
+                    </label>
                 </div>
             )}
 
@@ -667,13 +701,13 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
                         value={count}
                         onChange={(e) => { setCount(e.target.value); if (countError) setCountError(''); }}
                         className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 dark:text-white dark:bg-gray-700 dark:border-gray-600 leading-tight focus:outline-none focus:shadow-outline disabled:opacity-50"
-                        disabled={isScanning || isPreparing || ipSource === 'third' || ipSource === 'custom'}
+                        disabled={isScanning || isPreparing || ipSource === 'third' || (ipSource === 'custom' && fullCidr)}
                     />
                     {countError && <p className="text-red-500 text-xs mt-1">{countError}</p>}
                 </div>
                 <div>
                     <label htmlFor="port-select" className="block text-gray-700 dark:text-gray-300 text-sm font-bold mb-1">端口:</label>
-                    <select id="port-select" value={selectedPort} onChange={(e) => setSelectedPort(Number(e.target.value))} className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 dark:text-white dark:bg-gray-700 dark:border-gray-600 leading-tight focus:outline-none focus:shadow-outline disabled:opacity-50" disabled={isScanning || isPreparing || ipSource === 'third' || ipSource === 'custom'}>
+                    <select id="port-select" value={selectedPort} onChange={(e) => setSelectedPort(Number(e.target.value))} className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 dark:text-white dark:bg-gray-700 dark:border-gray-600 leading-tight focus:outline-none focus:shadow-outline disabled:opacity-50" disabled={isScanning || isPreparing || ipSource === 'third'}>
                         {PORTS_TO_TEST.map(port => (
                             <option key={port} value={port}>{port}</option>
                         ))}
