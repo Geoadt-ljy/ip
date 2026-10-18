@@ -62,6 +62,24 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
     const [avgEnabled, setAvgEnabled] = useState(false); // 多轮平均测试开关
     const [avgMetrics, setAvgMetrics] = useState({ latency: true, download: true, loss: true });
     const [avgRounds, setAvgRounds] = useState('3');
+    // 自动优选配置
+    const [autoEnabled, setAutoEnabled] = useState(false);
+    const [autoAfterScan, setAutoAfterScan] = useState(false);
+    const [autoCandidates, setAutoCandidates] = useState('30');
+    const [autoLatencyOn, setAutoLatencyOn] = useState(true);
+    const [autoLatencyMax, setAutoLatencyMax] = useState('300');
+    const [autoPerRegion, setAutoPerRegion] = useState('0');
+    const [autoDlOn, setAutoDlOn] = useState(false);
+    const [autoDlMin, setAutoDlMin] = useState('10');
+    const [autoLossOn, setAutoLossOn] = useState(false);
+    const [autoLossMax, setAutoLossMax] = useState('10');
+    const [autoKeep, setAutoKeep] = useState('20');
+    const [autoRunning, setAutoRunning] = useState(false);
+    const [sortKey, setSortKey] = useState<'default' | 'latency' | 'download' | 'loss'>('default');
+    const autoRanRef = useRef<ScanResult[] | null>(null);
+    // 导出配置
+    const [exportScope, setExportScope] = useState<'selected' | 'all'>('selected');
+    const [exportFormat, setExportFormat] = useState<'ipport' | 'ip' | 'csv'>('ipport');
     const [avgLatencyMap, setAvgLatencyMap] = useState<Record<string, number>>({});
     const [isAvgTesting, setIsAvgTesting] = useState(false);
     const [avgDone, setAvgDone] = useState(0);
@@ -258,6 +276,19 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         });
     }
 
+    // 排序：已有平均/测速数据的行排在前面，再按所选指标排序（延迟、丢包升序；下载降序）
+    if (sortKey !== 'default') {
+        const hasData = (r: ScanResult) => (speedKey(r) in avgLatencyMap) || (speedKey(r) in browserSpeedMap) || (speedKey(r) in packetLossMap);
+        const latOf = (r: ScanResult) => avgLatencyMap[speedKey(r)] ?? r.latency;
+        const lossOf = (r: ScanResult) => { const x = packetLossMap[speedKey(r)]; return x && !x.error ? x.packetLoss : 101; };
+        limitedResults = [...limitedResults].sort((a, b) => {
+            const d = Number(hasData(b)) - Number(hasData(a));
+            if (d !== 0) return d;
+            if (sortKey === 'latency') return latOf(a) - latOf(b);
+            if (sortKey === 'download') return displayDownloadMbps(b) - displayDownloadMbps(a);
+            return lossOf(a) - lossOf(b);
+        });
+    }
     const filteredResults = limitedResults;
 
     const visibleSpeedKeys = new Set(filteredResults.filter(r => !r.domain).map(speedKey));
@@ -406,25 +437,32 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
 
     const abortPacketLoss = () => packetLossAbortRef.current?.abort();
 
-    // 多轮平均测试：对勾选 IP 重复 N 轮，按所选指标（延迟/下载速度/丢包率）取平均
-    const handleAvgTest = async () => {
-        const targets = filteredResults.filter(r => !r.domain && selectedSpeedTargets.has(speedKey(r)));
-        if (targets.length === 0) {
-            showToast('请先勾选一个或多个 IPv4 IP', 'warning');
-            return;
-        }
-        if (!avgMetrics.latency && !avgMetrics.download && !avgMetrics.loss) {
-            showToast('请至少选择一项要取平均的指标', 'warning');
-            return;
-        }
-        const rounds = Math.max(1, Math.min(10, Math.floor(Number(avgRounds)) || 3));
+    type Measured = { lat?: number; dl?: number; loss?: number };
+    type MeasureMetrics = { latency: boolean; download: boolean; loss: boolean };
+    const num = (v: string, def: number, min: number, max: number) => {
+        const n = Number(v);
+        return Number.isFinite(n) && v.trim() !== '' ? Math.max(min, Math.min(max, n)) : def;
+    };
+    const capByRegion = (list: ScanResult[], k: number) => {
+        if (k <= 0) return list;
+        const c: Record<string, number> = {};
+        return list.filter(r => {
+            const g = r.colo || 'Unknown';
+            c[g] = (c[g] || 0) + 1;
+            return c[g] <= k;
+        });
+    };
+
+    // 多轮测量核心：对给定 IP 重复 N 轮，按所选指标（延迟/下载速度/丢包率）取平均，并写入各结果表
+    const runMeasure = async (targets: ScanResult[], metrics: MeasureMetrics, rounds: number): Promise<{ data: Record<string, Measured>; aborted: boolean }> => {
         const controller = new AbortController();
         avgAbortRef.current = controller;
         const signal = controller.signal;
+        const data: Record<string, Measured> = {};
         setIsAvgTesting(true);
         setAvgDone(0);
         setAvgTotal(targets.length);
-        if (avgMetrics.download) setSpeedPending(Object.fromEntries(targets.map(t => [speedKey(t), true as const])));
+        if (metrics.download) setSpeedPending(Object.fromEntries(targets.map(t => [speedKey(t), true as const])));
         const template = downloadTestAddress === 'ns'
             ? 'https://{hexip}.ns.psb.kdns.fr:{port}/__down?bytes={bytes}'
             : downloadTestAddress === 'bestcf'
@@ -444,11 +482,11 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                     let received = 0;
                     let interrupted = false;
                     for (let i = 0; i < rounds && !signal.aborted; i++) {
-                        if (avgMetrics.latency) {
+                        if (metrics.latency) {
                             const r = await testIpLatency(target.ip, target.port, 3000);
                             if (r.latency > 0) lats.push(r.latency);
                         }
-                        if (avgMetrics.download && !signal.aborted) {
+                        if (metrics.download && !signal.aborted) {
                             const r = await testBrowserDownloadSpeed(target.ip, target.port, {
                                 bytes: downloadBytes,
                                 timeoutMs: 20000,
@@ -458,7 +496,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                             if (r.aborted) { interrupted = true; break; }
                             if (r.downloadMbps > 0) dls.push(r.downloadMbps);
                         }
-                        if (avgMetrics.loss && !signal.aborted) {
+                        if (metrics.loss && !signal.aborted) {
                             const r = await testBrowserPacketLoss(target.ip, target.port, { attempts: 10, timeoutMs: 3000, urlTemplate: packetLossUrlTemplate, signal });
                             if (r.aborted) { interrupted = true; break; }
                             if (!r.error) { sent += r.sent; received += r.received; }
@@ -467,32 +505,169 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                     // 被中断的目标数据不完整，不记录
                     if (interrupted || signal.aborted) return;
                     const mean = (a: number[]) => a.reduce((x, y) => x + y, 0) / a.length;
-                    if (lats.length > 0) setAvgLatencyMap(prev => ({ ...prev, [key]: Math.round(mean(lats)) }));
-                    if (avgMetrics.download) {
-                        if (dls.length > 0) setBrowserSpeedMap(prev => ({ ...prev, [key]: Number(mean(dls).toFixed(2)) }));
+                    const m: Measured = {};
+                    if (lats.length > 0) { m.lat = Math.round(mean(lats)); setAvgLatencyMap(prev => ({ ...prev, [key]: m.lat as number })); }
+                    if (metrics.download) {
+                        if (dls.length > 0) { m.dl = Number(mean(dls).toFixed(2)); setBrowserSpeedMap(prev => ({ ...prev, [key]: m.dl as number })); }
                         else setBrowserSpeedErrors(prev => ({ ...prev, [key]: '平均测速失败' }));
                         setSpeedPending(prev => { const next = { ...prev }; delete next[key]; return next; });
                     }
                     if (sent > 0) {
-                        setPacketLossMap(prev => ({ ...prev, [key]: { packetLoss: Number((((sent - received) / sent) * 100).toFixed(1)), sent, received } }));
+                        m.loss = Number((((sent - received) / sent) * 100).toFixed(1));
+                        setPacketLossMap(prev => ({ ...prev, [key]: { packetLoss: m.loss as number, sent, received } }));
                     }
+                    data[key] = m;
                     done++;
                     setAvgDone(done);
                 }
             };
             await Promise.all(Array.from({ length: Math.min(3, targets.length) }, () => worker()));
-            if (signal.aborted) {
-                showToast(`已中断平均值测试：完成 ${done}/${targets.length} 个 IP`, 'warning');
-            } else {
-                showToast(`平均值测试完成：${done} 个 IP，每个 ${rounds} 轮`, 'success');
-            }
         } finally {
             setIsAvgTesting(false);
             setSpeedPending({});
             if (avgAbortRef.current === controller) avgAbortRef.current = null;
         }
+        return { data, aborted: signal.aborted };
+    };
+
+    // 手动：对勾选的 IP 做多轮平均测试
+    const handleAvgTest = async () => {
+        const targets = filteredResults.filter(r => !r.domain && selectedSpeedTargets.has(speedKey(r)));
+        if (targets.length === 0) {
+            showToast('请先勾选一个或多个 IPv4 IP', 'warning');
+            return;
+        }
+        if (!avgMetrics.latency && !avgMetrics.download && !avgMetrics.loss) {
+            showToast('请至少选择一项要取平均的指标', 'warning');
+            return;
+        }
+        const rounds = Math.floor(num(avgRounds, 3, 1, 10));
+        const { data, aborted } = await runMeasure(targets, avgMetrics, rounds);
+        const n = Object.keys(data).length;
+        showToast(aborted ? `已中断平均值测试：完成 ${n}/${targets.length} 个 IP` : `平均值测试完成：${n} 个 IP，每个 ${rounds} 轮`, aborted ? 'warning' : 'success');
     };
     const abortAvgTest = () => avgAbortRef.current?.abort();
+
+    // 自动优选：初筛候选 → 多轮平均测试 → 按条件筛选 → 排序 → 勾选前 N 个
+    const runAutoPipeline = async () => {
+        if (isAvgTesting || isBrowserSpeedTesting || isPacketLossTesting || autoRunning) return;
+        const latMax = autoLatencyOn ? num(autoLatencyMax, 300, 1, 100000) : Infinity;
+        const perRegion = Math.floor(num(autoPerRegion, 0, 0, 1000));
+        const candN = Math.floor(num(autoCandidates, 30, 1, 500));
+        const keepN = Math.floor(num(autoKeep, 20, 1, 500));
+        const dlMin = num(autoDlMin, 10, 0, 100000);
+        const lossMax = num(autoLossMax, 10, 0, 100);
+        const rounds = Math.floor(num(avgRounds, 3, 1, 10));
+
+        const pool = scanResults
+            .filter(r => !r.domain && r.latency > 0 && r.latency <= latMax
+                && (selectedPorts.size === 0 || selectedPorts.has(String(r.port)))
+                && (selectedRegions.size === 0 || !r.colo || selectedRegions.has(r.colo)))
+            .sort((a, b) => a.latency - b.latency);
+        const candidates = capByRegion(pool, perRegion).slice(0, candN);
+        if (candidates.length === 0) {
+            showToast('没有符合初筛条件的 IP，请放宽延迟上限或地区/端口选择', 'warning');
+            return;
+        }
+        let metrics: MeasureMetrics = {
+            latency: autoLatencyOn || sortKey === 'latency',
+            download: autoDlOn || sortKey === 'download',
+            loss: autoLossOn || sortKey === 'loss',
+        };
+        if (!metrics.latency && !metrics.download && !metrics.loss) metrics = { ...metrics, latency: true };
+
+        setAutoRunning(true);
+        try {
+            setSelectedSpeedTargets(new Set(candidates.map(speedKey)));
+            const { data, aborted } = await runMeasure(candidates, metrics, rounds);
+            if (aborted) {
+                showToast('自动优选已中断', 'warning');
+                return;
+            }
+            const passed = candidates.filter(c => {
+                const m = data[speedKey(c)];
+                if (!m) return false;
+                if (autoLatencyOn && !(m.lat !== undefined && m.lat <= latMax)) return false;
+                if (autoDlOn && !(m.dl !== undefined && m.dl >= dlMin)) return false;
+                if (autoLossOn && !(m.loss !== undefined && m.loss <= lossMax)) return false;
+                return true;
+            });
+            const rankKey = sortKey === 'default' ? 'latency' : sortKey;
+            const latOf = (c: ScanResult) => data[speedKey(c)]?.lat ?? c.latency;
+            passed.sort((a, b) => {
+                const ma = data[speedKey(a)] || {};
+                const mb = data[speedKey(b)] || {};
+                if (rankKey === 'download') return (mb.dl ?? 0) - (ma.dl ?? 0);
+                if (rankKey === 'loss') return (ma.loss ?? 101) - (mb.loss ?? 101);
+                return latOf(a) - latOf(b);
+            });
+            const finalList = capByRegion(passed, perRegion).slice(0, keepN);
+            setSelectedSpeedTargets(new Set(finalList.map(speedKey)));
+            if (sortKey === 'default') setSortKey('latency');
+            showToast(
+                finalList.length > 0
+                    ? `自动优选完成：候选 ${candidates.length} 个，达标 ${passed.length} 个，已勾选前 ${finalList.length} 个`
+                    : `自动优选完成：候选 ${candidates.length} 个，但没有 IP 满足全部达标条件，可放宽条件后重试`,
+                finalList.length > 0 ? 'success' : 'warning',
+            );
+        } finally {
+            setAutoRunning(false);
+        }
+    };
+
+    // 扫描完成（结果更新）后自动执行优选
+    useEffect(() => {
+        if (!autoEnabled || !autoAfterScan || scanResults.length === 0) return;
+        if (autoRanRef.current === scanResults) return;
+        autoRanRef.current = scanResults;
+        void runAutoPipeline();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [scanResults, autoEnabled, autoAfterScan]);
+
+    // 导出：复制到剪贴板 / 下载文件
+    const buildExportText = (): { text: string; count: number; ext: string } => {
+        const rows = exportScope === 'selected'
+            ? limitedResults.filter(r => !r.domain && selectedSpeedTargets.has(speedKey(r)))
+            : limitedResults;
+        const hostPort = (r: ScanResult) => `${r.ip.includes(':') ? `[${r.ip}]` : r.ip}:${r.port}`;
+        if (exportFormat === 'csv') {
+            const lossOf = (r: ScanResult) => { const x = packetLossMap[speedKey(r)]; return x && !x.error ? x.packetLoss : ''; };
+            const lines = ['ip,port,colo,latency_ms,avg_latency_ms,download_mbps,packet_loss_pct'];
+            rows.forEach(r => lines.push([
+                r.ip, r.port, r.colo || '', r.latency > -1 ? r.latency : '',
+                avgLatencyMap[speedKey(r)] ?? '', displayDownloadMbps(r) > 0 ? displayDownloadMbps(r).toFixed(2) : '', lossOf(r),
+            ].join(',')));
+            return { text: lines.join('\n'), count: rows.length, ext: 'csv' };
+        }
+        const lines = rows.map(r => exportFormat === 'ip' ? r.ip : `${hostPort(r)}#${r.colo || '-'}`);
+        return { text: lines.join('\n'), count: rows.length, ext: 'txt' };
+    };
+    const handleExportCopy = async () => {
+        const { text, count } = buildExportText();
+        if (count === 0) { showToast(exportScope === 'selected' ? '请先勾选要导出的 IP，或改为“当前列表全部”' : '没有可导出的结果', 'warning'); return; }
+        try {
+            await navigator.clipboard.writeText(text);
+            showToast(`已复制 ${count} 条到剪贴板`, 'success');
+        } catch {
+            showToast('复制失败：浏览器未授权剪贴板，请改用下载', 'error');
+        }
+    };
+    const handleExportDownload = () => {
+        const { text, count, ext } = buildExportText();
+        if (count === 0) { showToast(exportScope === 'selected' ? '请先勾选要导出的 IP，或改为“当前列表全部”' : '没有可导出的结果', 'warning'); return; }
+        const d = new Date();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const name = `优选IP-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.${ext}`;
+        const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        showToast(`已导出 ${count} 条：${name}`, 'success');
+    };
 
     const handlePurity = async () => {
         const ips = Array.from(new Set(filteredResults.filter(r => !r.domain && selectedSpeedTargets.has(speedKey(r))).map(r => r.ip)));
@@ -666,6 +841,78 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                                             )}
                                         </>
                                     )}
+                                </div>
+                                <div className="w-full rounded-lg border border-gray-200 dark:border-gray-600 p-3 flex flex-col gap-2">
+                                    <label className="flex items-center gap-1.5 text-xs font-bold text-gray-700 dark:text-gray-200 cursor-pointer">
+                                        <input type="checkbox" checked={autoEnabled} onChange={(e) => setAutoEnabled(e.target.checked)} disabled={autoRunning} />
+                                        自动优选（初筛 → 多轮平均测试 → 按条件筛选并排序）
+                                    </label>
+                                    {autoEnabled && (
+                                        <>
+                                            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-700 dark:text-gray-200">
+                                                <label className="flex items-center gap-1">候选数量
+                                                    <input type="number" min={1} max={500} value={autoCandidates} onChange={(e) => setAutoCandidates(e.target.value)} disabled={autoRunning} className="w-16 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5" />
+                                                </label>
+                                                <label className="flex items-center gap-1">
+                                                    <input type="checkbox" checked={autoLatencyOn} onChange={(e) => setAutoLatencyOn(e.target.checked)} disabled={autoRunning} />
+                                                    延迟 ≤
+                                                    <input type="number" min={1} value={autoLatencyMax} onChange={(e) => setAutoLatencyMax(e.target.value)} disabled={autoRunning || !autoLatencyOn} className="w-16 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5" /> ms
+                                                </label>
+                                                <label className="flex items-center gap-1">每个地区最多
+                                                    <input type="number" min={0} max={1000} value={autoPerRegion} onChange={(e) => setAutoPerRegion(e.target.value)} disabled={autoRunning} className="w-14 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5" /> 个（0=不限）
+                                                </label>
+                                                <label className="flex items-center gap-1">
+                                                    <input type="checkbox" checked={autoDlOn} onChange={(e) => setAutoDlOn(e.target.checked)} disabled={autoRunning} />
+                                                    下载 ≥
+                                                    <input type="number" min={0} value={autoDlMin} onChange={(e) => setAutoDlMin(e.target.value)} disabled={autoRunning || !autoDlOn} className="w-16 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5" /> Mbps
+                                                </label>
+                                                <label className="flex items-center gap-1">
+                                                    <input type="checkbox" checked={autoLossOn} onChange={(e) => setAutoLossOn(e.target.checked)} disabled={autoRunning} />
+                                                    丢包 ≤
+                                                    <input type="number" min={0} max={100} value={autoLossMax} onChange={(e) => setAutoLossMax(e.target.value)} disabled={autoRunning || !autoLossOn} className="w-14 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5" /> %
+                                                </label>
+                                                <label className="flex items-center gap-1">测试轮数
+                                                    <input type="number" min={1} max={10} value={avgRounds} onChange={(e) => setAvgRounds(e.target.value)} disabled={autoRunning || isAvgTesting} className="w-14 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5" />
+                                                </label>
+                                                <label className="flex items-center gap-1">最终保留
+                                                    <input type="number" min={1} max={500} value={autoKeep} onChange={(e) => setAutoKeep(e.target.value)} disabled={autoRunning} className="w-16 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5" /> 个
+                                                </label>
+                                                <label className="flex items-center gap-1">排序依据
+                                                    <select value={sortKey} onChange={(e) => setSortKey(e.target.value as 'default' | 'latency' | 'download' | 'loss')} disabled={autoRunning} className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5">
+                                                        <option value="default">默认（扫描顺序）</option>
+                                                        <option value="latency">平均延迟（低→高）</option>
+                                                        <option value="download">下载速度（高→低）</option>
+                                                        <option value="loss">丢包率（低→高）</option>
+                                                    </select>
+                                                </label>
+                                            </div>
+                                            <div className="text-[11px] text-gray-500 dark:text-gray-400">地区和端口沿用下方的勾选；延迟既用于初筛（单次延迟），也用于达标判断（平均延迟）；每个地区上限在初筛和最终保留两步都生效。</div>
+                                            <div className="flex flex-wrap items-center gap-3">
+                                                <button onClick={() => void runAutoPipeline()} disabled={autoRunning || isAvgTesting || isBrowserSpeedTesting || isPacketLossTesting} className="px-3 py-1 text-xs font-medium rounded-full bg-indigo-100 text-indigo-800 hover:bg-indigo-200 disabled:opacity-50 dark:bg-indigo-900/40 dark:text-indigo-300">{autoRunning ? `优选中 ${avgDone}/${avgTotal}` : '开始自动优选'}</button>
+                                                {autoRunning && (
+                                                    <button onClick={abortAvgTest} className="px-3 py-1 text-xs font-medium rounded-full bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/40 dark:text-red-300">■ 中断优选</button>
+                                                )}
+                                                <label className="flex items-center gap-1 text-xs text-gray-700 dark:text-gray-200">
+                                                    <input type="checkbox" checked={autoAfterScan} onChange={(e) => setAutoAfterScan(e.target.checked)} />
+                                                    扫描完成后自动执行
+                                                </label>
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+                                <div className="flex items-center gap-2 flex-wrap w-full text-xs text-gray-700 dark:text-gray-200">
+                                    <span className="font-medium">导出:</span>
+                                    <select value={exportScope} onChange={(e) => setExportScope(e.target.value as 'selected' | 'all')} className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-1">
+                                        <option value="selected">仅勾选项</option>
+                                        <option value="all">当前列表全部</option>
+                                    </select>
+                                    <select value={exportFormat} onChange={(e) => setExportFormat(e.target.value as 'ipport' | 'ip' | 'csv')} className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-1">
+                                        <option value="ipport">IP:端口#地区</option>
+                                        <option value="ip">仅 IP</option>
+                                        <option value="csv">CSV（含全部指标）</option>
+                                    </select>
+                                    <button onClick={() => void handleExportCopy()} className="px-3 py-1 rounded-full bg-sky-100 text-sky-800 hover:bg-sky-200 dark:bg-sky-900/40 dark:text-sky-300">复制</button>
+                                    <button onClick={handleExportDownload} className="px-3 py-1 rounded-full bg-sky-100 text-sky-800 hover:bg-sky-200 dark:bg-sky-900/40 dark:text-sky-300">下载文件</button>
                                 </div>
                                 <div className="flex items-center gap-2 flex-wrap">
                                     <label htmlFor="download-test-address" className="text-xs text-gray-600 dark:text-gray-300">下载测速地址</label>
