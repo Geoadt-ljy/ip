@@ -17,6 +17,7 @@ export interface ScanResult {
     downloadMbps?: number; // 本地 Agent 下载测速结果（Mbps）
     downloadBytes?: number;
     downloadError?: string;
+    purity?: import('../api').PurityResult;
     testedAt?: number;     // 该条记录最近一次测试/保存的时间戳（毫秒），供订阅接口按新鲜度过滤
 }
 
@@ -600,6 +601,57 @@ function generateRandomIPFromCIDR(cidr: string): string {
     ].join('.');
 }
 
+
+
+const ipToInt = (ip: string): number => ip.split('.').reduce((a, b) => a * 256 + Number(b), 0);
+const intToIpStr = (n: number): string => [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.');
+
+/** 分层筛选用的网段块：前缀小于 /24 的网段按 /24 切分，其余保持原样 */
+export interface CidrBlock { cidr: string; start: number; end: number; }
+
+export function splitCidrBlocks(cidrs: string[], maxBlocks = 3000): CidrBlock[] {
+    const seen = new Map<string, CidrBlock>();
+    for (const c of cidrs) {
+        const [base, pre] = c.split('/');
+        const prefix = Number(pre);
+        const size = 2 ** (32 - prefix);
+        const start = Math.floor(ipToInt(base) / size) * size;
+        const step = prefix < 24 ? 256 : size;
+        const bPrefix = prefix < 24 ? 24 : prefix;
+        for (let s = start; s < start + size; s += step) {
+            const cidr = `${intToIpStr(s)}/${bPrefix}`;
+            if (!seen.has(cidr)) seen.set(cidr, { cidr, start: s, end: s + step - 1 });
+        }
+    }
+    const all = Array.from(seen.values());
+    if (all.length <= maxBlocks) return all;
+    for (let i = all.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [all[i], all[j]] = [all[j], all[i]];
+    }
+    return all.slice(0, maxBlocks);
+}
+
+/** 每个网段块随机抽 perBlock 个主机 IP */
+export function sampleBlockIps(blocks: CidrBlock[], perBlock: number): string[] {
+    const out: string[] = [];
+    for (const b of blocks) {
+        const size = b.end - b.start + 1;
+        const lo = size > 2 ? 1 : 0;
+        const hi = size > 2 ? size - 2 : size - 1;
+        const n = Math.min(perBlock, hi - lo + 1);
+        const picked = new Set<number>();
+        while (picked.size < n) picked.add(lo + Math.floor(Math.random() * (hi - lo + 1)));
+        picked.forEach(o => out.push(intToIpStr(b.start + o)));
+    }
+    return out;
+}
+
+/** 找到某个 IP 所属的网段块 */
+export function findCidrBlock(blocks: CidrBlock[], ip: string): CidrBlock | undefined {
+    const n = ipToInt(ip);
+    return blocks.find(b => n >= b.start && n <= b.end);
+}
 
 /** 网段内可测试的主机数量（前缀 <=30 时去掉网络地址和广播地址） */
 export function cidrHostCount(cidr: string): number {

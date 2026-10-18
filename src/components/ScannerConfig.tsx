@@ -18,6 +18,10 @@ import {
     isDomainName,
     isIpv4Cidr,
     expandAllCidrs,
+    splitCidrBlocks,
+    sampleBlockIps,
+    findCidrBlock,
+    type CidrBlock,
     cidrHostCount,
     resolveDomainToIp,
     probeBrowserAvailable,
@@ -50,6 +54,10 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
     const [ipSource, setIpSource] = useState<'cf' | 'cm' | 'third' | 'custom'>('cf');
     const [customIps, setCustomIps] = useState('');
     const [fullCidr, setFullCidr] = useState(false); // 自定义网段：测试网段内全部 IP
+    const [stratified, setStratified] = useState(false); // 分层筛选：先每个 /24 抽样，再精测最优 /24
+    const [keepBlocks, setKeepBlocks] = useState('20'); // 精测阶段保留的最优 /24 数量
+    const [stage, setStage] = useState<{ no: 0 | 1 | 2; text: string }>({ no: 0, text: '' });
+    const stopRequestedRef = useRef(false);
     const customFileRef = useRef<HTMLInputElement | null>(null);
     const [isScanning, setIsScanning] = useState(false);
     const [progress, setProgress] = useState(0);
@@ -222,7 +230,7 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
         }
     };
 
-    const prepareTargets = async (countNum: number): Promise<{ targets: string[]; resolvedMap?: Record<string, string | null> } | null> => {
+    const prepareTargets = async (countNum: number): Promise<{ targets: string[]; resolvedMap?: Record<string, string | null>; stratify?: { blocks: CidrBlock[]; keep: number } } | null> => {
         setSourceRows([]);
         setUniqueIpCount(0);
         setGrossIpCount(0);
@@ -244,6 +252,20 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
             if (bad > 0) showToast(`有 ${bad} 项无法识别（网段前缀需在 8-32 之间），已忽略`, 'warning');
             let expanded: string[] = [];
             if (cidrs.length > 0) {
+                const agentOn = activeTab === 'local' && agentProbe?.online === true;
+                const keep = Math.max(1, Math.min(500, Math.floor(Number(keepBlocks)) || 20));
+                if (fullCidr && stratified) {
+                    if (agentOn) {
+                        showToast('分层筛选仅支持浏览器端测速，已改为直接测试全部 IP', 'info');
+                    } else {
+                        const blocks = splitCidrBlocks(cidrs);
+                        if (blocks.length > keep) {
+                            const stage1 = Array.from(new Set([...plain, ...sampleBlockIps(blocks, 3)]));
+                            return { targets: stage1, stratify: { blocks, keep } };
+                        }
+                        showToast(`网段只有 ${blocks.length} 个 /24，不需要分层筛选，直接测试全部 IP`, 'info');
+                    }
+                }
                 if (fullCidr) {
                     const r = expandAllCidrs(cidrs, MAX_IMPORT_TARGETS);
                     expanded = r.ips;
@@ -513,6 +535,53 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
                 onScanComplete(finalResults);
             };
 
+            // 分层筛选：阶段 1 每个 /24 抽样粗筛，阶段 2 只精测最优的若干 /24
+            stopRequestedRef.current = false;
+            if (prepared.stratify) {
+                const { blocks, keep } = prepared.stratify;
+                const port = ipSource === 'third' ? 0 : selectedPort;
+                setIsPreparing(false);
+                setIsScanning(true);
+                setStartTime(Date.now());
+                setNow(Date.now());
+                setAgentActive(false);
+                agentModeRef.current = false;
+
+                setStage({ no: 1, text: `阶段 1/2：抽样粗筛 ${blocks.length} 个 /24` });
+                const stage1: ScanResult[] = [];
+                const s1 = new BatchScanner(targets, port, val.threadsNum, val.latencyLimitNum,
+                    (r) => { stage1.push(r); onProgress(r); }, () => { }, prepared.resolvedMap);
+                scannerRef.current = s1;
+                await s1.run();
+
+                if (!stopRequestedRef.current) {
+                    const best = new Map<CidrBlock, number>();
+                    for (const r of stage1) {
+                        if (!r.isAvailable) continue;
+                        const b = findCidrBlock(blocks, r.ip);
+                        if (b && (!best.has(b) || r.latency < (best.get(b) as number))) best.set(b, r.latency);
+                    }
+                    const ranked = Array.from(best.entries()).sort((a, b) => a[1] - b[1]).slice(0, keep).map(([b]) => b.cidr);
+                    if (ranked.length === 0) {
+                        showToast('粗筛中没有可用的网段，请放宽延迟上限或检查网络', 'warning');
+                    } else {
+                        const tested = new Set(stage1.map(r => r.ip));
+                        const exp = expandAllCidrs(ranked, MAX_IMPORT_TARGETS);
+                        const stage2 = exp.ips.filter(ip => !tested.has(ip));
+                        if (stage2.length > 0) {
+                            setTotal(targets.length + stage2.length);
+                            setStage({ no: 2, text: `阶段 2/2：精测最优 ${ranked.length} 个 /24（${stage2.length} 个 IP）` });
+                            const s2 = new BatchScanner(stage2, port, val.threadsNum, val.latencyLimitNum, onProgress, () => { }, undefined);
+                            scannerRef.current = s2;
+                            await s2.run();
+                        }
+                    }
+                }
+                setStage({ no: 0, text: '' });
+                onComplete(currentResults.filter(r => r.isAvailable).sort((a, b) => a.latency - b.latency));
+                return;
+            }
+
             // Step 4: 启动扫描（按当前 Tab 决定走本地 Agent 还是浏览器端）
             setIsPreparing(false);
             setIsScanning(true);
@@ -556,6 +625,7 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
     };
 
     const handleStopScan = () => {
+        stopRequestedRef.current = true;
         setIsStopping(true);
         setIsPaused(false);
         setStartTime(null);
@@ -689,6 +759,14 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
                             return <span className={n > MAX_IMPORT_TARGETS ? 'text-xs text-amber-500' : 'text-xs text-gray-400'}>共 {n} 个{n > MAX_IMPORT_TARGETS ? `，超过上限将随机抽 ${MAX_IMPORT_TARGETS} 个` : ''}</span>;
                         })()}
                     </label>
+                    {fullCidr && (
+                        <label className="mt-2 flex flex-wrap items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                            <input type="checkbox" checked={stratified} onChange={(e) => setStratified(e.target.checked)} disabled={isScanning || isPreparing} />
+                            <span>分层筛选：先每个 /24 抽 3 个粗筛，只精测最优的</span>
+                            <input type="number" min={1} max={500} value={keepBlocks} onChange={(e) => setKeepBlocks(e.target.value)} disabled={isScanning || isPreparing || !stratified} className="w-16 border rounded px-2 py-0.5 text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white" />
+                            <span>个 /24</span>
+                        </label>
+                    )}
                 </div>
             )}
 
@@ -1041,6 +1119,14 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
                             <span className="text-green-600">成功: {successCount}</span>
                             <span className="text-gray-500 dark:text-gray-400">已用: {fmt(elapsedSec)}</span>
                             <span className="text-red-600">失败: {failCount}</span>
+                        </div>
+                        <div className="flex justify-between text-xs mt-1 text-gray-500 dark:text-gray-400">
+                            <span>{stage.text}</span>
+                            <span>{(() => {
+                                if (progress < 5 || elapsedSec < 3 || progress >= total) return '预计剩余: 计算中…';
+                                const remain = Math.ceil((total - progress) / (progress / elapsedSec));
+                                return `${stage.no === 1 ? '粗筛剩余' : '预计剩余'}: ${fmt(remain)}`;
+                            })()}</span>
                         </div>
                     </div>
                 );
