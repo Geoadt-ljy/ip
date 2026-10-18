@@ -59,6 +59,30 @@ export function CloudflareIpList({ onDataLoaded }: CloudflareIpListProps) {
         loadData();
     }, []);
 
+    // 点击网段标签：通知“IP优选测速”把网段加入自定义 IP 输入框
+    const addCidrs = (cidrs: string[]) => {
+        window.dispatchEvent(new CustomEvent('ip-main:add-cidr', { detail: { cidrs } }));
+    };
+
+    const renderChips = (list?: string[]) => (list && list.length > 0 ? list.map(cidr => (
+        <button
+            type="button"
+            key={cidr}
+            onClick={() => addCidrs([cidr])}
+            title="点击加入自定义 IP 输入框"
+            className="bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 px-2 py-1 rounded text-xs font-mono hover:bg-blue-100 hover:text-blue-700 dark:hover:bg-blue-900/50 dark:hover:text-blue-300 transition-colors"
+        >{cidr}</button>
+    )) : <p className="text-gray-400 text-xs italic">暂无数据</p>);
+
+    const addAllButton = (list?: string[]) => (list && list.length > 0 ? (
+        <button
+            type="button"
+            onClick={() => addCidrs(list)}
+            className="px-2 py-0.5 text-xs font-medium text-blue-600 bg-blue-100 rounded-full hover:bg-blue-200 dark:bg-blue-900/50 dark:text-blue-300 dark:hover:bg-blue-800/50"
+            title="把本组全部网段加入自定义 IP 输入框"
+        >全部加入</button>
+    ) : null);
+
     return (
         <div className="bg-white dark:bg-gray-800 shadow-md rounded-lg p-6 mb-8">
             <div className="flex items-center gap-4 mb-6">
@@ -80,11 +104,10 @@ export function CloudflareIpList({ onDataLoaded }: CloudflareIpListProps) {
                   <div className="flex items-center gap-2 mb-3">
                     <h3 className="font-bold text-gray-600 dark:text-gray-300">CF官方IP段</h3>
                     <span className="text-xs text-gray-400 dark:text-gray-500">cloudflare官方公布的ip段，覆盖最全</span>
+                    {addAllButton(cfIps?.ipv4_cidrs)}
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    {cfIps?.ipv4_cidrs && cfIps.ipv4_cidrs.length > 0 ? cfIps.ipv4_cidrs.map(cidr => (
-                      <span key={cidr} className="bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 px-2 py-1 rounded text-xs font-mono">{cidr}</span>
-                    )) : <p className="text-gray-400 text-xs italic">暂无数据</p>}
+                    {renderChips(cfIps?.ipv4_cidrs)}
                   </div>
                 </div>
 
@@ -92,11 +115,10 @@ export function CloudflareIpList({ onDataLoaded }: CloudflareIpListProps) {
                   <div className="flex items-center gap-2 mb-3">
                     <h3 className="font-bold text-gray-600 dark:text-gray-300">CM整理IP段</h3>
                     <span className="text-xs text-gray-400 dark:text-gray-500">民间大佬维护IP段，测速成功率高</span>
+                    {addAllButton(cfIps?.cm_cidrs)}
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    {cfIps?.cm_cidrs && cfIps.cm_cidrs.length > 0 ? cfIps.cm_cidrs.map(cidr => (
-                      <span key={cidr} className="bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 px-2 py-1 rounded text-xs font-mono">{cidr}</span>
-                    )) : <p className="text-gray-400 text-xs italic">暂无数据</p>}
+                    {renderChips(cfIps?.cm_cidrs)}
                   </div>
                 </div>
             </div>

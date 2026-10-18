@@ -58,6 +58,23 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
     const [keepBlocks, setKeepBlocks] = useState('20'); // 精测阶段保留的最优 /24 数量
     const [stage, setStage] = useState<{ no: 0 | 1 | 2; text: string }>({ no: 0, text: '' });
     const stopRequestedRef = useRef(false);
+    type CidrPreset = { text: string; fullCidr: boolean; stratified: boolean; keepBlocks: string };
+    const PRESET_KEY = 'ip-main:cidr-presets';
+    const [presets, setPresets] = useState<Record<string, CidrPreset>>(() => {
+        try { return JSON.parse(localStorage.getItem(PRESET_KEY) || '{}'); } catch { return {}; }
+    });
+    const [presetName, setPresetName] = useState('');
+    const [presetSel, setPresetSel] = useState('');
+    const persistPresets = (next: Record<string, CidrPreset>) => {
+        setPresets(next);
+        try { localStorage.setItem(PRESET_KEY, JSON.stringify(next)); } catch { /* 存储不可用时忽略 */ }
+    };
+    const mergeLines = (existing: string, extra: string[]) => {
+        const have = existing.split(/[\s,，]+/).map(x => x.trim()).filter(Boolean);
+        const set = new Set(have);
+        const add = extra.filter(x => !set.has(x));
+        return { text: [...have, ...add].join('\n'), added: add.length };
+    };
     const customFileRef = useRef<HTMLInputElement | null>(null);
     const [isScanning, setIsScanning] = useState(false);
     const [progress, setProgress] = useState(0);
@@ -659,6 +676,52 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
         setIsPaused(false);
     };
 
+    // 接收“IP段”卡片里点击的网段，加入自定义 IP 输入框
+    useEffect(() => {
+        const handler = (e: Event) => {
+            if (isScanning || isPreparing) return;
+            const cidrs = (e as CustomEvent<{ cidrs: string[] }>).detail?.cidrs ?? [];
+            if (cidrs.length === 0) return;
+            const { text, added } = mergeLines(customIps, cidrs);
+            setCustomIps(text);
+            setIpSource('custom');
+            showToast(added > 0 ? `已加入 ${added} 个网段到自定义 IP` : '这些网段已在自定义 IP 里', added > 0 ? 'success' : 'info');
+        };
+        window.addEventListener('ip-main:add-cidr', handler);
+        return () => window.removeEventListener('ip-main:add-cidr', handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [customIps, isScanning, isPreparing]);
+
+    const handleSavePreset = () => {
+        const name = presetName.trim();
+        if (!name) { showToast('请输入预设名称', 'warning'); return; }
+        if (!customIps.trim()) { showToast('自定义 IP 输入框是空的，没有内容可保存', 'warning'); return; }
+        persistPresets({ ...presets, [name]: { text: customIps, fullCidr, stratified, keepBlocks } });
+        setPresetSel(name);
+        showToast(`预设“${name}”已保存`, 'success');
+    };
+    const handleLoadPreset = (append: boolean) => {
+        const pr = presets[presetSel];
+        if (!pr) { showToast('请先选择一个预设', 'warning'); return; }
+        if (append) {
+            setCustomIps(mergeLines(customIps, pr.text.split(/[\s,，]+/).map(x => x.trim()).filter(Boolean)).text);
+        } else {
+            setCustomIps(pr.text);
+            setFullCidr(!!pr.fullCidr);
+            setStratified(!!pr.stratified);
+            setKeepBlocks(pr.keepBlocks || '20');
+        }
+        showToast(`已${append ? '追加' : '载入'}预设“${presetSel}”`, 'success');
+    };
+    const handleDeletePreset = () => {
+        if (!presets[presetSel]) return;
+        const next = { ...presets };
+        delete next[presetSel];
+        persistPresets(next);
+        showToast(`已删除预设“${presetSel}”`, 'success');
+        setPresetSel('');
+    };
+
     // 扫描进行中且未暂停时，每 1 秒刷新 now 以更新已用时间
     useEffect(() => {
         if (!isScanning || isPaused) return;
@@ -749,6 +812,18 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
                         <input ref={customFileRef} type="file" accept=".txt,.csv,text/plain,text/csv" onChange={(e) => void handleCustomFile(e)} className="hidden" />
                     </div>
                     <textarea id="custom-ips" value={customIps} onChange={(e) => setCustomIps(e.target.value)} disabled={isScanning || isPreparing} rows={5} className="w-full border rounded p-3 font-mono text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white" placeholder="104.16.1.1\n104.17.2.2:443\n104.16.0.0/20\n172.67.64.0/20" />
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                        <span>预设:</span>
+                        <select value={presetSel} onChange={(e) => setPresetSel(e.target.value)} disabled={isScanning || isPreparing} className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-1 text-xs">
+                            <option value="">选择已保存的预设</option>
+                            {Object.keys(presets).map(n => <option key={n} value={n}>{n}</option>)}
+                        </select>
+                        <button type="button" onClick={() => handleLoadPreset(false)} disabled={!presetSel || isScanning || isPreparing} className="px-2 py-1 text-xs rounded-full bg-blue-100 text-blue-700 hover:bg-blue-200 disabled:opacity-50 dark:bg-blue-900/40 dark:text-blue-300">载入</button>
+                        <button type="button" onClick={() => handleLoadPreset(true)} disabled={!presetSel || isScanning || isPreparing} className="px-2 py-1 text-xs rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-600 dark:text-gray-200">追加</button>
+                        <button type="button" onClick={handleDeletePreset} disabled={!presetSel || isScanning || isPreparing} className="px-2 py-1 text-xs rounded-full bg-red-100 text-red-700 hover:bg-red-200 disabled:opacity-50 dark:bg-red-900/40 dark:text-red-300">删除</button>
+                        <input type="text" value={presetName} onChange={(e) => setPresetName(e.target.value)} placeholder="预设名称" disabled={isScanning || isPreparing} className="w-28 border rounded px-2 py-1 text-xs dark:bg-gray-700 dark:border-gray-600 dark:text-white" />
+                        <button type="button" onClick={handleSavePreset} disabled={isScanning || isPreparing} className="px-2 py-1 text-xs rounded-full bg-emerald-100 text-emerald-700 hover:bg-emerald-200 disabled:opacity-50 dark:bg-emerald-900/40 dark:text-emerald-300">保存当前</button>
+                    </div>
                     <label className="mt-2 flex flex-wrap items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
                         <input type="checkbox" checked={fullCidr} onChange={(e) => setFullCidr(e.target.checked)} disabled={isScanning || isPreparing} />
                         <span>测试网段内全部 IP（不勾选则按“随机IP数量”抽样）</span>
