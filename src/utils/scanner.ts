@@ -17,7 +17,6 @@ export interface ScanResult {
     downloadMbps?: number; // 本地 Agent 下载测速结果（Mbps）
     downloadBytes?: number;
     downloadError?: string;
-    purity?: import('../api').PurityResult;
     testedAt?: number;     // 该条记录最近一次测试/保存的时间戳（毫秒），供订阅接口按新鲜度过滤
 }
 
