@@ -74,6 +74,64 @@ export function usePipelineConfig(): [PipelineConfig, typeof setPipelineConfig] 
     return [s, setPipelineConfig];
 }
 
+export const getPipelineDefaults = (): PipelineConfig => ({ ...DEFAULTS });
+
+/** 恢复默认配置（保留总开关状态） */
+export function resetPipelineConfig(): void {
+    setPipelineConfig({ ...DEFAULTS, enabled: state.enabled });
+}
+
+// ---------- 已保存的流水线预设（不含总开关） ----------
+export type PipelinePreset = Omit<PipelineConfig, 'enabled'>;
+const PRESET_KEY = 'ip-main:pipeline-presets';
+
+function loadPresets(): Record<string, PipelinePreset> {
+    try {
+        const raw = JSON.parse(localStorage.getItem(PRESET_KEY) || '{}');
+        return raw && typeof raw === 'object' ? raw : {};
+    } catch {
+        return {};
+    }
+}
+
+let presets: Record<string, PipelinePreset> = loadPresets();
+const presetListeners = new Set<() => void>();
+const getPresets = () => presets;
+const subscribePresets = (l: () => void) => {
+    presetListeners.add(l);
+    return () => { presetListeners.delete(l); };
+};
+function commitPresets(next: Record<string, PipelinePreset>): void {
+    presets = next; // 每次生成新对象，保证 useSyncExternalStore 能感知变化
+    try { localStorage.setItem(PRESET_KEY, JSON.stringify(presets)); } catch { /* 存储不可用时忽略 */ }
+    presetListeners.forEach(l => l());
+}
+
+export function usePipelinePresets(): Record<string, PipelinePreset> {
+    return useSyncExternalStore(subscribePresets, getPresets);
+}
+
+/** 保存当前配置为预设（同名覆盖） */
+export function savePipelinePreset(name: string): void {
+    const rest: Partial<PipelineConfig> = { ...state };
+    delete rest.enabled;
+    commitPresets({ ...presets, [name]: rest as PipelinePreset });
+}
+
+/** 载入预设（不改变总开关）；缺失的字段用默认值补齐 */
+export function loadPipelinePreset(name: string): boolean {
+    const pr = presets[name];
+    if (!pr) return false;
+    setPipelineConfig({ ...DEFAULTS, ...pr, enabled: state.enabled });
+    return true;
+}
+
+export function deletePipelinePreset(name: string): void {
+    const next = { ...presets };
+    delete next[name];
+    commitPresets(next);
+}
+
 export interface RegionRule { code: string; limit?: number; dlMin?: number }
 
 /**

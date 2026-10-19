@@ -428,6 +428,8 @@ export class BatchScanner {
     private port: number;
     private threads: number;
     private latencyLimit: number;
+    // 单次探测的超时：要覆盖首次连接（DNS + TCP + TLS）和之后计时的第二次请求，不能直接用延迟上限，否则低延迟上限会误判大量 IP 失败
+    private connectTimeout: number;
     private onProgress: (result: ScanResult) => void;
     private onComplete: (results: ScanResult[]) => void;
     private abortController: AbortController;
@@ -449,6 +451,7 @@ export class BatchScanner {
         this.port = port;
         this.threads = Math.min(ips.length, threads);
         this.latencyLimit = latencyLimit;
+        this.connectTimeout = Math.min(8000, Math.max(1500, latencyLimit * 2));
         this.onProgress = onProgress;
         this.onComplete = onComplete;
         this.abortController = new AbortController();
@@ -536,7 +539,7 @@ export class BatchScanner {
                     testHost = resolved;
                 }
 
-                const { latency, colo } = await testIpLatency(testHost, port, this.latencyLimit);
+                const { latency, colo } = await testIpLatency(testHost, port, this.connectTimeout);
 
                 const result: ScanResult = {
                     ip: isDomain ? host : testHost, // 域名源保存域名，IP源保存IP
