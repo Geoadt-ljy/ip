@@ -35,6 +35,8 @@ import { useToast } from './Toast';
 import { Gauge, Play, StopCircle, Loader2, Pause, Square, Cpu, RefreshCw, AlertTriangle, CheckCircle2, Upload } from 'lucide-react';
 import { parseIpFileText, MAX_IMPORT_TARGETS } from '../utils/ipFile';
 import { useConfirm } from './ConfirmDialog';
+import { PipelineSettings } from './PipelineSettings';
+import { usePipelineConfig, getPipelineConfig, applyScanFilter } from '../utils/pipelineConfig';
 
 interface IpScannerConfigAndControlProps {
     cfIps: CloudflareIps | null;
@@ -53,6 +55,9 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
     const [selectedPort, setSelectedPort] = useState(443);
     const [ipSource, setIpSource] = useState<'cf' | 'cm' | 'third' | 'custom'>('cf');
     const [customIps, setCustomIps] = useState('');
+    const [pipe] = usePipelineConfig(); // 流水线统一配置（总开关开启时接管延迟上限）
+    const pipeLatency = pipe.enabled && pipe.latencyOn ? Math.floor(Number(pipe.latencyMax)) : 0;
+    const latencyOverride = Number.isFinite(pipeLatency) && pipeLatency > 0 ? pipeLatency : 0;
     const [fullCidr, setFullCidr] = useState(false); // 自定义网段：测试网段内全部 IP
     const [stratified, setStratified] = useState(false); // 分层筛选：先每个 /24 抽样，再精测最优 /24
     const [keepBlocks, setKeepBlocks] = useState('20'); // 精测阶段保留的最优 /24 数量
@@ -189,7 +194,7 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
         } else {
             setThreadsError('');
         }
-        if (!/^\d+$/.test(latencyLimitTrim)) {
+        if (!latencyOverride && !/^\d+$/.test(latencyLimitTrim)) {
             setLatencyLimitError('请输入有效的正整数');
             hasError = true;
         } else {
@@ -200,7 +205,7 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
         return {
             countNum: parseInt(countTrim, 10),
             threadsNum: parseInt(threadsTrim, 10),
-            latencyLimitNum: parseInt(latencyLimitTrim, 10),
+            latencyLimitNum: latencyOverride || parseInt(latencyLimitTrim, 10),
         };
     };
 
@@ -549,7 +554,14 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
                 }
                 setIsScanning(false);
                 setStartTime(null);
-                onScanComplete(finalResults);
+                const cfg = getPipelineConfig();
+                if (cfg.enabled) {
+                    const filtered = applyScanFilter(finalResults, cfg);
+                    if (filtered.removed > 0) showToast(`流水线已按地区/每地区上限筛选，去掉 ${filtered.removed} 条`, 'info');
+                    onScanComplete(filtered.results);
+                } else {
+                    onScanComplete(finalResults);
+                }
             };
 
             // 分层筛选：阶段 1 每个 /24 抽样粗筛，阶段 2 只精测最优的若干 /24
@@ -883,11 +895,13 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
                     <input
                         id="latency-limit"
                         type="text"
-                        value={latencyLimit}
+                        value={latencyOverride ? String(latencyOverride) : latencyLimit}
                         onChange={(e) => { setLatencyLimit(e.target.value); if (latencyLimitError) setLatencyLimitError(''); }}
                         className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 dark:text-white dark:bg-gray-700 dark:border-gray-600 leading-tight focus:outline-none focus:shadow-outline disabled:opacity-50"
-                        disabled={isScanning || isPreparing}
+                        disabled={isScanning || isPreparing || latencyOverride > 0}
+                        title={latencyOverride ? '流水线已启用，延迟上限由流水线配置接管' : undefined}
                     />
+                    {latencyOverride > 0 && <p className="text-[11px] text-indigo-500 mt-1">流水线接管中</p>}
                     {latencyLimitError && <p className="text-red-500 text-xs mt-1">{latencyLimitError}</p>}
                 </div>
 
@@ -1029,6 +1043,8 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
                     </div>
                 )}
             </div>
+
+            <PipelineSettings disabled={isScanning || isPreparing} />
 
             <div className="mb-4 flex justify-center" >
                 <button onClick={handleScan} disabled={isScanning || isPreparing || (activeTab === 'local' && !agentProbe?.online)} className="flex items-center bg-purple-600 text-white font-bold py-2 px-4 rounded-md hover:bg-purple-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed">

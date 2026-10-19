@@ -11,6 +11,7 @@ import { useToast } from './Toast';
 import { useConfirm } from './ConfirmDialog';
 import { ListFilter, Save, X } from 'lucide-react';
 import { RegionDisplay } from './RegionDisplay';
+import { usePipelineConfig, parseRegionRules, regionLimits, regionDlMins, capByRegion as capByRegionShared, type PipelineSortKey } from '../utils/pipelineConfig';
 
 interface IpScannerResultsAndSaveProps {
     scanResults: ScanResult[];
@@ -50,21 +51,24 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
     const avgAbortRef = useRef<AbortController | null>(null);
     const [avgEnabled, setAvgEnabled] = useState(false); // 多轮平均测试开关
     const [avgMetrics, setAvgMetrics] = useState({ latency: true, download: true, loss: true });
-    const [avgRounds, setAvgRounds] = useState('3');
     // 自动优选配置
-    const [autoEnabled, setAutoEnabled] = useState(false);
-    const [autoAfterScan, setAutoAfterScan] = useState(false);
-    const [autoCandidates, setAutoCandidates] = useState('30');
-    const [autoLatencyOn, setAutoLatencyOn] = useState(true);
-    const [autoLatencyMax, setAutoLatencyMax] = useState('300');
-    const [autoPerRegion, setAutoPerRegion] = useState('0');
-    const [autoDlOn, setAutoDlOn] = useState(false);
-    const [autoDlMin, setAutoDlMin] = useState('10');
-    const [autoLossOn, setAutoLossOn] = useState(false);
-    const [autoLossMax, setAutoLossMax] = useState('10');
-    const [autoKeep, setAutoKeep] = useState('20');
     const [autoRunning, setAutoRunning] = useState(false);
-    const [sortKey, setSortKey] = useState<'default' | 'latency' | 'download' | 'loss'>('default');
+    const [pipe, setPipe] = usePipelineConfig(); // 流水线统一配置（与“扫描配置”共用）
+    const autoEnabled = pipe.enabled;
+    const autoAfterScan = pipe.afterScan;
+    const autoCandidates = pipe.candidates;
+    const autoLatencyOn = pipe.latencyOn;
+    const autoLatencyMax = pipe.latencyMax;
+    const autoPerRegion = pipe.perRegion;
+    const autoDlOn = pipe.dlOn;
+    const autoDlMin = pipe.dlMin;
+    const autoLossOn = pipe.lossOn;
+    const autoLossMax = pipe.lossMax;
+    const autoKeep = pipe.keep;
+    const avgRounds = pipe.rounds;
+    const sortKey = pipe.sortKey;
+    const setAvgRounds = (v: string) => setPipe({ rounds: v });
+    const setSortKey = (k: PipelineSortKey) => setPipe({ sortKey: k });
     const autoRanRef = useRef<ScanResult[] | null>(null);
     // 导出配置
     const [exportScope, setExportScope] = useState<'selected' | 'all'>('selected');
@@ -401,15 +405,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         const n = Number(v);
         return Number.isFinite(n) && v.trim() !== '' ? Math.max(min, Math.min(max, n)) : def;
     };
-    const capByRegion = (list: ScanResult[], k: number) => {
-        if (k <= 0) return list;
-        const c: Record<string, number> = {};
-        return list.filter(r => {
-            const g = r.colo || 'Unknown';
-            c[g] = (c[g] || 0) + 1;
-            return c[g] <= k;
-        });
-    };
+    const capByRegion = (list: ScanResult[], k: number, limits: Record<string, number> = {}) => capByRegionShared(list, k, limits);
 
     // 多轮测量核心：对给定 IP 重复 N 轮，按所选指标（延迟/下载速度/丢包率）取平均，并写入各结果表
     const runMeasure = async (targets: ScanResult[], metrics: MeasureMetrics, rounds: number): Promise<{ data: Record<string, Measured>; aborted: boolean }> => {
@@ -507,7 +503,8 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
     const abortAvgTest = () => avgAbortRef.current?.abort();
 
     // 自动优选：初筛候选 → 多轮平均测试 → 按条件筛选 → 排序 → 勾选前 N 个
-    const runAutoPipeline = async () => {
+    // mode: full=从全部扫描结果开始；selected=对已勾选的重新测试并筛选；refilter=按已有测速数据重新筛选（不测试）
+    const runAutoPipeline = async (mode: 'full' | 'selected' | 'refilter' = 'full') => {
         if (isAvgTesting || isBrowserSpeedTesting || isPacketLossTesting || autoRunning) return;
         const latMax = autoLatencyOn ? num(autoLatencyMax, 300, 1, 100000) : Infinity;
         const perRegion = Math.floor(num(autoPerRegion, 0, 0, 1000));
@@ -516,37 +513,92 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         const dlMin = num(autoDlMin, 10, 0, 100000);
         const lossMax = num(autoLossMax, 10, 0, 100);
         const rounds = Math.floor(num(avgRounds, 3, 1, 10));
+        const dlTopN = Math.floor(num(pipe.dlTopN, 0, 0, 500));
+        const regionRules = parseRegionRules(pipe.regions);
+        const regionList = regionRules.map(r => r.code);
+        const limits = regionLimits(regionRules);
+        const dlMins = regionDlMins(regionRules);
+        // 下载速度下限：地区单独设置优先，其次是全局“下载 ≥”
+        const dlThresholdOf = (c: ScanResult): number | undefined => dlMins[(c.colo || '').toUpperCase()] ?? (autoDlOn ? dlMin : undefined);
+        const needDl = autoDlOn || Object.keys(dlMins).length > 0 || sortKey === 'download';
 
-        const pool = scanResults
-            .filter(r => !r.domain && r.latency > 0 && r.latency <= latMax
-                && (selectedPorts.size === 0 || selectedPorts.has(String(r.port)))
-                && (selectedRegions.size === 0 || !r.colo || selectedRegions.has(r.colo)))
-            .sort((a, b) => a.latency - b.latency);
-        const candidates = capByRegion(pool, perRegion).slice(0, candN);
-        if (candidates.length === 0) {
-            showToast('没有符合初筛条件的 IP，请放宽延迟上限或地区/端口选择', 'warning');
-            return;
-        }
-        let metrics: MeasureMetrics = {
-            latency: autoLatencyOn || sortKey === 'latency',
-            download: autoDlOn || sortKey === 'download',
-            loss: autoLossOn || sortKey === 'loss',
-        };
-        if (!metrics.latency && !metrics.download && !metrics.loss) metrics = { ...metrics, latency: true };
-
-        setAutoRunning(true);
-        try {
-            setSelectedSpeedTargets(new Set(candidates.map(speedKey)));
-            const { data, aborted } = await runMeasure(candidates, metrics, rounds);
-            if (aborted) {
-                showToast('自动优选已中断', 'warning');
+        let candidates: ScanResult[];
+        if (mode === 'full') {
+            const pool = scanResults
+                .filter(r => !r.domain && r.latency > 0 && r.latency <= latMax
+                    && (selectedPorts.size === 0 || selectedPorts.has(String(r.port)))
+                    && (selectedRegions.size === 0 || !r.colo || selectedRegions.has(r.colo))
+                    && (regionList.length === 0 || !r.colo || regionList.includes(r.colo.toUpperCase())))
+                .sort((a, b) => a.latency - b.latency);
+            candidates = capByRegion(pool, perRegion, limits).slice(0, candN);
+            if (candidates.length === 0) {
+                showToast('没有符合初筛条件的 IP，请放宽延迟上限或地区/端口选择', 'warning');
                 return;
             }
+        } else {
+            candidates = filteredResults.filter(r => !r.domain && selectedSpeedTargets.has(speedKey(r)));
+            if (candidates.length === 0) {
+                showToast('请先在列表里勾选要继续筛选的 IP', 'warning');
+                return;
+            }
+        }
+
+        const data: Record<string, Measured> = {};
+        setAutoRunning(true);
+        try {
+            if (mode === 'refilter') {
+                // 不重新测试：直接用列表里已有的平均/测速数据
+                for (const c of candidates) {
+                    const k = speedKey(c);
+                    const dl = displayDownloadMbps(c);
+                    const pl = packetLossMap[k];
+                    data[k] = {
+                        lat: avgLatencyMap[k] ?? (c.latency > 0 ? c.latency : undefined),
+                        dl: dl > 0 ? dl : undefined,
+                        loss: pl && !pl.error ? pl.packetLoss : undefined,
+                    };
+                }
+            } else {
+                if (mode === 'full') setSelectedSpeedTargets(new Set(candidates.map(speedKey)));
+                // 阶段 A：延迟（和丢包）。设置了“下载只测延迟前 N 个”时，下载放到阶段 B
+                const splitDl = needDl && dlTopN > 0;
+                let metricsA: MeasureMetrics = {
+                    latency: autoLatencyOn || sortKey === 'latency' || splitDl,
+                    download: needDl && !splitDl,
+                    loss: autoLossOn || sortKey === 'loss',
+                };
+                if (!metricsA.latency && !metricsA.download && !metricsA.loss) metricsA = { ...metricsA, latency: true };
+                const resA = await runMeasure(candidates, metricsA, rounds);
+                if (resA.aborted) {
+                    showToast('自动优选已中断', 'warning');
+                    return;
+                }
+                Object.assign(data, resA.data);
+                if (splitDl) {
+                    const ranked = candidates
+                        .filter(c => {
+                            const m = data[speedKey(c)];
+                            return !!m && !(autoLatencyOn && !(m.lat !== undefined && m.lat <= latMax));
+                        })
+                        .sort((a, b) => (data[speedKey(a)]?.lat ?? a.latency) - (data[speedKey(b)]?.lat ?? b.latency))
+                        .slice(0, dlTopN);
+                    if (ranked.length > 0) {
+                        const resB = await runMeasure(ranked, { latency: false, download: true, loss: false }, rounds);
+                        if (resB.aborted) {
+                            showToast('自动优选已中断', 'warning');
+                            return;
+                        }
+                        for (const [k, m] of Object.entries(resB.data)) data[k] = { ...(data[k] || {}), ...m };
+                    }
+                }
+            }
+
             const passed = candidates.filter(c => {
                 const m = data[speedKey(c)];
                 if (!m) return false;
                 if (autoLatencyOn && !(m.lat !== undefined && m.lat <= latMax)) return false;
-                if (autoDlOn && !(m.dl !== undefined && m.dl >= dlMin)) return false;
+                const th = dlThresholdOf(c);
+                if (th !== undefined && !(m.dl !== undefined && m.dl >= th)) return false;
                 if (autoLossOn && !(m.loss !== undefined && m.loss <= lossMax)) return false;
                 return true;
             });
@@ -559,19 +611,21 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                 if (rankKey === 'loss') return (ma.loss ?? 101) - (mb.loss ?? 101);
                 return latOf(a) - latOf(b);
             });
-            const finalList = capByRegion(passed, perRegion).slice(0, keepN);
+            const finalList = capByRegion(passed, perRegion, limits).slice(0, keepN);
             setSelectedSpeedTargets(new Set(finalList.map(speedKey)));
             if (sortKey === 'default') setSortKey('latency');
+            const label = mode === 'refilter' ? '重新筛选完成' : mode === 'selected' ? '再优选完成' : '自动优选完成';
             showToast(
                 finalList.length > 0
-                    ? `自动优选完成：候选 ${candidates.length} 个，达标 ${passed.length} 个，已勾选前 ${finalList.length} 个`
-                    : `自动优选完成：候选 ${candidates.length} 个，但没有 IP 满足全部达标条件，可放宽条件后重试`,
+                    ? `${label}：${mode === 'full' ? '候选' : '参与'} ${candidates.length} 个，达标 ${passed.length} 个，已勾选前 ${finalList.length} 个`
+                    : `${label}：${mode === 'full' ? '候选' : '参与'} ${candidates.length} 个，但没有 IP 满足全部达标条件，可放宽条件后重试`,
                 finalList.length > 0 ? 'success' : 'warning',
             );
         } finally {
             setAutoRunning(false);
         }
     };
+
 
     // 扫描完成（结果更新）后自动执行优选
     useEffect(() => {
@@ -715,63 +769,29 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                                         </>
                                     )}
                                 </div>
-                                <div className="w-full rounded-lg border border-gray-200 dark:border-gray-600 p-3 flex flex-col gap-2">
-                                    <label className="flex items-center gap-1.5 text-xs font-bold text-gray-700 dark:text-gray-200 cursor-pointer">
-                                        <input type="checkbox" checked={autoEnabled} onChange={(e) => setAutoEnabled(e.target.checked)} disabled={autoRunning} />
-                                        自动优选（初筛 → 多轮平均测试 → 按条件筛选并排序）
-                                    </label>
-                                    {autoEnabled && (
+                                <div className="flex items-center gap-3 flex-wrap w-full text-xs text-gray-700 dark:text-gray-200">
+                                    {autoEnabled ? (
                                         <>
-                                            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-700 dark:text-gray-200">
-                                                <label className="flex items-center gap-1">候选数量
-                                                    <input type="number" min={1} max={500} value={autoCandidates} onChange={(e) => setAutoCandidates(e.target.value)} disabled={autoRunning} className="w-16 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5" />
-                                                </label>
-                                                <label className="flex items-center gap-1">
-                                                    <input type="checkbox" checked={autoLatencyOn} onChange={(e) => setAutoLatencyOn(e.target.checked)} disabled={autoRunning} />
-                                                    延迟 ≤
-                                                    <input type="number" min={1} value={autoLatencyMax} onChange={(e) => setAutoLatencyMax(e.target.value)} disabled={autoRunning || !autoLatencyOn} className="w-16 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5" /> ms
-                                                </label>
-                                                <label className="flex items-center gap-1">每个地区最多
-                                                    <input type="number" min={0} max={1000} value={autoPerRegion} onChange={(e) => setAutoPerRegion(e.target.value)} disabled={autoRunning} className="w-14 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5" /> 个（0=不限）
-                                                </label>
-                                                <label className="flex items-center gap-1">
-                                                    <input type="checkbox" checked={autoDlOn} onChange={(e) => setAutoDlOn(e.target.checked)} disabled={autoRunning} />
-                                                    下载 ≥
-                                                    <input type="number" min={0} value={autoDlMin} onChange={(e) => setAutoDlMin(e.target.value)} disabled={autoRunning || !autoDlOn} className="w-16 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5" /> Mbps
-                                                </label>
-                                                <label className="flex items-center gap-1">
-                                                    <input type="checkbox" checked={autoLossOn} onChange={(e) => setAutoLossOn(e.target.checked)} disabled={autoRunning} />
-                                                    丢包 ≤
-                                                    <input type="number" min={0} max={100} value={autoLossMax} onChange={(e) => setAutoLossMax(e.target.value)} disabled={autoRunning || !autoLossOn} className="w-14 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5" /> %
-                                                </label>
-                                                <label className="flex items-center gap-1">测试轮数
-                                                    <input type="number" min={1} max={10} value={avgRounds} onChange={(e) => setAvgRounds(e.target.value)} disabled={autoRunning || isAvgTesting} className="w-14 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5" />
-                                                </label>
-                                                <label className="flex items-center gap-1">最终保留
-                                                    <input type="number" min={1} max={500} value={autoKeep} onChange={(e) => setAutoKeep(e.target.value)} disabled={autoRunning} className="w-16 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5" /> 个
-                                                </label>
-                                                <label className="flex items-center gap-1">排序依据
-                                                    <select value={sortKey} onChange={(e) => setSortKey(e.target.value as 'default' | 'latency' | 'download' | 'loss')} disabled={autoRunning} className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5">
-                                                        <option value="default">默认（扫描顺序）</option>
-                                                        <option value="latency">平均延迟（低→高）</option>
-                                                        <option value="download">下载速度（高→低）</option>
-                                                        <option value="loss">丢包率（低→高）</option>
-                                                    </select>
-                                                </label>
-                                            </div>
-                                            <div className="text-[11px] text-gray-500 dark:text-gray-400">地区和端口沿用下方的勾选；延迟既用于初筛（单次延迟），也用于达标判断（平均延迟）；每个地区上限在初筛和最终保留两步都生效。</div>
-                                            <div className="flex flex-wrap items-center gap-3">
-                                                <button onClick={() => void runAutoPipeline()} disabled={autoRunning || isAvgTesting || isBrowserSpeedTesting || isPacketLossTesting} className="px-3 py-1 text-xs font-medium rounded-full bg-indigo-100 text-indigo-800 hover:bg-indigo-200 disabled:opacity-50 dark:bg-indigo-900/40 dark:text-indigo-300">{autoRunning ? `优选中 ${avgDone}/${avgTotal}` : '开始自动优选'}</button>
-                                                {autoRunning && (
-                                                    <button onClick={abortAvgTest} className="px-3 py-1 text-xs font-medium rounded-full bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/40 dark:text-red-300">■ 中断优选</button>
-                                                )}
-                                                <label className="flex items-center gap-1 text-xs text-gray-700 dark:text-gray-200">
-                                                    <input type="checkbox" checked={autoAfterScan} onChange={(e) => setAutoAfterScan(e.target.checked)} />
-                                                    扫描完成后自动执行
-                                                </label>
-                                            </div>
+                                            <span className="font-bold">流水线:</span>
+                                            <button onClick={() => void runAutoPipeline()} disabled={autoRunning || isAvgTesting || isBrowserSpeedTesting || isPacketLossTesting} title="按“扫描配置”里的流水线设置，对当前结果做初筛、多轮平均测试、筛选并勾选" className="px-3 py-1 text-xs font-medium rounded-full bg-indigo-100 text-indigo-800 hover:bg-indigo-200 disabled:opacity-50 dark:bg-indigo-900/40 dark:text-indigo-300">{autoRunning ? `优选中 ${avgDone}/${avgTotal}` : '开始自动优选'}</button>
+                                            <button onClick={() => void runAutoPipeline('selected')} disabled={autoRunning || isAvgTesting || isBrowserSpeedTesting || isPacketLossTesting || selectedVisibleSpeedKeys.length === 0} title="只对已勾选的 IP 重新测试，再按流水线条件筛选，没达标的会被取消勾选" className="px-3 py-1 text-xs font-medium rounded-full bg-indigo-50 text-indigo-700 hover:bg-indigo-100 disabled:opacity-50 dark:bg-indigo-900/30 dark:text-indigo-300">对已勾选再优选 ({selectedVisibleSpeedKeys.length})</button>
+                                            <button onClick={() => void runAutoPipeline('refilter')} disabled={autoRunning || isAvgTesting || isBrowserSpeedTesting || isPacketLossTesting || selectedVisibleSpeedKeys.length === 0} title="不重新测试，按列表里已有的延迟/下载/丢包数据，用当前流水线条件重新筛选已勾选的 IP" className="px-3 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-200">按现有数据重新筛选</button>
+                                            {autoRunning && (
+                                                <button onClick={abortAvgTest} className="px-3 py-1 text-xs font-medium rounded-full bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/40 dark:text-red-300">■ 中断优选</button>
+                                            )}
+                                            <span className="text-gray-500 dark:text-gray-400">{autoAfterScan ? '扫描完成后自动执行' : '手动触发'}；参数在“扫描配置”的流水线里修改</span>
                                         </>
+                                    ) : (
+                                        <span className="text-gray-500 dark:text-gray-400">流水线未启用（可在“扫描配置”里打开）</span>
                                     )}
+                                    <label className="flex items-center gap-1">排序
+                                        <select value={sortKey} onChange={(e) => setSortKey(e.target.value as PipelineSortKey)} disabled={autoRunning} className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5">
+                                            <option value="default">默认（扫描顺序）</option>
+                                            <option value="latency">平均延迟（低→高）</option>
+                                            <option value="download">下载速度（高→低）</option>
+                                            <option value="loss">丢包率（低→高）</option>
+                                        </select>
+                                    </label>
                                 </div>
                                 <div className="flex items-center gap-2 flex-wrap w-full text-xs text-gray-700 dark:text-gray-200">
                                     <span className="font-medium">导出:</span>
