@@ -459,10 +459,12 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                     // 被中断的目标数据不完整，不记录
                     if (interrupted || signal.aborted) return;
                     const mean = (a: number[]) => a.reduce((x, y) => x + y, 0) / a.length;
+                    // 成功的轮数不到一半时不给平均值，避免只靠个别成功轮次得出过于乐观的结果
+                    const needOk = Math.max(1, Math.ceil(rounds / 2));
                     const m: Measured = {};
-                    if (lats.length > 0) { m.lat = Math.round(mean(lats)); setAvgLatencyMap(prev => ({ ...prev, [key]: m.lat as number })); }
+                    if (lats.length >= needOk) { m.lat = Math.round(mean(lats)); setAvgLatencyMap(prev => ({ ...prev, [key]: m.lat as number })); }
                     if (metrics.download) {
-                        if (dls.length > 0) { m.dl = Number(mean(dls).toFixed(2)); setBrowserSpeedMap(prev => ({ ...prev, [key]: m.dl as number })); }
+                        if (dls.length >= needOk) { m.dl = Number(mean(dls).toFixed(2)); setBrowserSpeedMap(prev => ({ ...prev, [key]: m.dl as number })); }
                         else setBrowserSpeedErrors(prev => ({ ...prev, [key]: '平均测速失败' }));
                         setSpeedPending(prev => { const next = { ...prev }; delete next[key]; return next; });
                     }

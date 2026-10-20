@@ -186,14 +186,14 @@ export async function testIpLatency(ip: string, port: number, timeout: number): 
                 if (data?.colo) colo = data.colo;
             } catch { /* 某些候选域名可能返回非 JSON */ }
 
-            const secondRequestStart = Date.now();
+            const secondRequestStart = performance.now();
             const second = await fetch(testUrl, { signal: controller.signal, headers, cache: 'no-store' });
             if (!second.ok) {
                 lastError = `HTTP ${second.status}`;
                 continue;
             }
             await second.arrayBuffer().catch(() => undefined);
-            return { latency: Date.now() - secondRequestStart, colo };
+            return { latency: Math.max(1, Math.round(performance.now() - secondRequestStart)), colo };
         } catch (error: any) {
             lastError = error?.name === 'AbortError' ? '超时' : '错误';
         } finally {
@@ -219,7 +219,7 @@ export async function testBrowserDownloadSpeed(
     ip: string,
     port: number,
     options: { bytes?: number; timeoutMs?: number; urlTemplate?: string; signal?: AbortSignal } = {}
-): Promise<{ downloadMbps: number; downloadBytes: number; downloadMs: number; error?: string; aborted?: boolean }> {
+): Promise<{ downloadMbps: number; downloadBytes: number; downloadMs: number; error?: string; aborted?: boolean; partial?: boolean }> {
     // 外部（用户点击“中断”）触发的取消：立即返回，不当作测速失败记录。
     const abortedResult = { downloadMbps: 0, downloadBytes: 0, downloadMs: 0, error: '已中断', aborted: true };
     if (options.signal?.aborted) return abortedResult;
@@ -288,6 +288,8 @@ export async function testBrowserDownloadSpeed(
         options.signal?.addEventListener('abort', onExternalAbort, { once: true });
         const startedAt = performance.now();
         let receivedBytes = 0;
+        let firstChunkAt = 0;
+        let bytesAfterFirst = 0;
         try {
             // 必须使用可读取响应体的 CORS 请求并统计实际字节；opaque/no-cors 只能测到响应头时间，
             // 不能据此推算下载速度。若测速域不允许 CORS，则明确报错并尝试下一个候选地址。
@@ -312,6 +314,8 @@ export async function testBrowserDownloadSpeed(
                         if (done) break;
                         if (value) {
                             receivedBytes += value.byteLength;
+                            if (!firstChunkAt) firstChunkAt = performance.now();
+                            else bytesAfterFirst += value.byteLength;
                             // 自定义地址即使忽略 bytes 参数，也限制本次最多接收约定的测速样本量。
                             if (receivedBytes >= bytes) {
                                 await reader.cancel().catch(() => undefined);
@@ -326,21 +330,40 @@ export async function testBrowserDownloadSpeed(
                 receivedBytes = (await response.arrayBuffer()).byteLength;
             }
 
-            const elapsedMs = Math.max(1, performance.now() - startedAt);
+            const nowMs = performance.now();
+            const elapsedMs = Math.max(1, nowMs - startedAt);
+            // 从收到第一块数据开始计时，排除 DNS/TCP/TLS 握手和首字节等待，更接近真实下载带宽
+            const dataMs = firstChunkAt && bytesAfterFirst > 0 ? Math.max(1, nowMs - firstChunkAt) : 0;
             if (receivedBytes <= 0) {
                 lastError = '测速端点未返回可读取的数据；请换一个支持 CORS 的测速地址';
                 continue;
             }
-            const mbps = (receivedBytes * 8) / (elapsedMs / 1000) / 1_000_000;
+            const mbps = dataMs > 0
+                ? (bytesAfterFirst * 8) / (dataMs / 1000) / 1_000_000
+                : (receivedBytes * 8) / (elapsedMs / 1000) / 1_000_000;
             const hostDomain = TEST_DOMAIN_CANDIDATES.find(domain => url.hostname.endsWith(`.${domain}`));
             if (hostDomain) cacheTestDomain(hostDomain);
             return {
                 downloadMbps: Number(mbps.toFixed(2)),
                 downloadBytes: receivedBytes,
-                downloadMs: Math.round(elapsedMs),
+                downloadMs: Math.round(dataMs > 0 ? dataMs : elapsedMs),
             };
         } catch (error: any) {
             if (options.signal?.aborted) return abortedResult;
+            // 超时但已经收到足够数据：用已下载部分计算速度，而不是把慢速 IP 记成失败
+            if (error?.name === 'AbortError' && firstChunkAt && bytesAfterFirst >= 256 * 1024) {
+                const partialMs = Math.max(1, performance.now() - firstChunkAt);
+                if (partialMs >= 1000) {
+                    const hostDomain = TEST_DOMAIN_CANDIDATES.find(domain => url.hostname.endsWith(`.${domain}`));
+                    if (hostDomain) cacheTestDomain(hostDomain);
+                    return {
+                        downloadMbps: Number(((bytesAfterFirst * 8) / (partialMs / 1000) / 1_000_000).toFixed(2)),
+                        downloadBytes: receivedBytes,
+                        downloadMs: Math.round(partialMs),
+                        partial: true,
+                    };
+                }
+            }
             lastError = error?.name === 'AbortError'
                 ? `下载测速超时（>${Math.round(timeoutMs / 1000)} 秒）`
                 : '测速地址连接失败或未开放 CORS；请切换测速地址';
@@ -430,6 +453,7 @@ export class BatchScanner {
     private latencyLimit: number;
     // 单次探测的超时：要覆盖首次连接（DNS + TCP + TLS）和之后计时的第二次请求，不能直接用延迟上限，否则低延迟上限会误判大量 IP 失败
     private connectTimeout: number;
+    private retryFailed: boolean;
     private onProgress: (result: ScanResult) => void;
     private onComplete: (results: ScanResult[]) => void;
     private abortController: AbortController;
@@ -445,8 +469,10 @@ export class BatchScanner {
         latencyLimit: number,
         onProgress: (result: ScanResult) => void,
         onComplete: (results: ScanResult[]) => void,
-        resolvedMap?: Record<string, string | null>
+        resolvedMap?: Record<string, string | null>,
+        retryFailed = false
     ) {
+        this.retryFailed = retryFailed;
         this.ips = ips;
         this.port = port;
         this.threads = Math.min(ips.length, threads);
@@ -477,6 +503,10 @@ export class BatchScanner {
      * 解析 "host:port" / "[IPv6]:port" / "host" 字符串
      */
     private parseTarget(rawTarget: string): { host: string; port: number } {
+        // 未加方括号的 IPv6 含多个冒号，整体当作主机，不能把最后一段误当成端口
+        if ((rawTarget.match(/:/g) || []).length > 1 && !rawTarget.includes('[')) {
+            return { host: rawTarget, port: this.port === 0 ? 443 : this.port };
+        }
         let host = rawTarget;
         let port = this.port;
 
@@ -539,7 +569,14 @@ export class BatchScanner {
                     testHost = resolved;
                 }
 
-                const { latency, colo } = await testIpLatency(testHost, port, this.connectTimeout);
+                let probe = await testIpLatency(testHost, port, this.connectTimeout);
+                // 失败或略高于上限时重试一次，取更好的结果，减少偶发超时/抖动造成的误判
+                if (this.retryFailed && !this.abortController.signal.aborted
+                    && (probe.latency <= 0 || (probe.latency > this.latencyLimit && probe.latency <= this.latencyLimit * 1.5))) {
+                    const again = await testIpLatency(testHost, port, this.connectTimeout);
+                    if (again.latency > 0 && (probe.latency <= 0 || again.latency < probe.latency)) probe = again;
+                }
+                const { latency, colo } = probe;
 
                 const result: ScanResult = {
                     ip: isDomain ? host : testHost, // 域名源保存域名，IP源保存IP
