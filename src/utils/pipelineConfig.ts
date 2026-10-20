@@ -23,6 +23,9 @@ export interface PipelineConfig {
     keep: string;           // 最终保留个数
     rounds: string;         // 多轮平均测试轮数
     sortKey: PipelineSortKey;
+    retestLatency: boolean;       // 复测项目：延迟
+    retestDownload: boolean;      // 复测项目：下载速度
+    retestLoss: boolean;          // 复测项目：丢包率
     retestConcurrency: string;    // 复测并发数（同时测几个 IP）
     retestStat: 'mean' | 'median'; // 复测统计方式：平均值 / 中位数
     dlMode: 'size' | 'time';      // 下载方式：size=按文件大小；time=限时测速
@@ -46,6 +49,9 @@ const DEFAULTS: PipelineConfig = {
     keep: '20',
     rounds: '3',
     sortKey: 'default',
+    retestLatency: true,
+    retestDownload: false,
+    retestLoss: false,
     retestConcurrency: '3',
     retestStat: 'mean',
     dlMode: 'size',

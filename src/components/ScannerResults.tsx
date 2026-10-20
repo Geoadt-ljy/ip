@@ -540,7 +540,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         const dlMins = regionDlMins(regionRules);
         // 下载速度下限：地区单独设置优先，其次是全局“下载 ≥”
         const dlThresholdOf = (c: ScanResult): number | undefined => dlMins[(c.colo || '').toUpperCase()] ?? (autoDlOn ? dlMin : undefined);
-        const needDl = autoDlOn || Object.keys(dlMins).length > 0 || sortKey === 'download';
+        const needDl = autoDlOn || Object.keys(dlMins).length > 0 || sortKey === 'download' || pipe.retestDownload;
 
         let candidates: ScanResult[];
         if (mode === 'full') {
@@ -583,9 +583,9 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                 // 阶段 A：延迟（和丢包）。设置了“下载只测延迟前 N 个”时，下载放到阶段 B
                 const splitDl = needDl && dlTopN > 0;
                 let metricsA: MeasureMetrics = {
-                    latency: autoLatencyOn || sortKey === 'latency' || splitDl,
+                    latency: autoLatencyOn || sortKey === 'latency' || splitDl || pipe.retestLatency,
                     download: needDl && !splitDl,
-                    loss: autoLossOn || sortKey === 'loss',
+                    loss: autoLossOn || sortKey === 'loss' || pipe.retestLoss,
                 };
                 if (!metricsA.latency && !metricsA.download && !metricsA.loss) metricsA = { ...metricsA, latency: true };
                 const resA = await runMeasure(candidates, metricsA, rounds);
@@ -1102,7 +1102,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                                                 </div>
                                             </td>
                                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{port}</td>
-                                            <td className={`px-6 py-4 whitespace-nowrap text-sm font-bold ${getLatencyColor(avgLatencyMap[`${ip}:${port}`] ?? latency)}`}>{avgLatencyMap[`${ip}:${port}`] !== undefined ? <>{avgLatencyMap[`${ip}:${port}`]}ms<span className="ml-1 text-[10px] font-normal text-gray-400">均值</span></> : (latency > -1 ? `${latency}ms` : 'N/A')}</td>
+                                            <td className={`px-6 py-4 whitespace-nowrap text-sm font-bold ${getLatencyColor(avgLatencyMap[`${ip}:${port}`] ?? latency)}`}>{avgLatencyMap[`${ip}:${port}`] !== undefined ? <>{avgLatencyMap[`${ip}:${port}`]}ms<span className="ml-1 text-[10px] font-normal text-gray-400">复测</span></> : (latency > -1 ? `${latency}ms` : 'N/A')}</td>
                                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{colo ? <RegionDisplay colo={colo} flagSize="sm" /> : '-'}</td>
                                             <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-blue-600 dark:text-blue-400">{displayDownloadMbps({ ip, port, latency, colo, domain, downloadMbps, isAvailable: true }) > 0 ? `${displayDownloadMbps({ ip, port, latency, colo, domain, downloadMbps, isAvailable: true }).toFixed(2)} Mbps` : (browserSpeedErrors[`${ip}:${port}`] ? '失败' : speedPending[`${ip}:${port}`] ? <span className="text-gray-400 animate-pulse">测速中…</span> : '-')}</td>
                                             <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold">{packetLossMap[`${ip}:${port}`] ? (packetLossMap[`${ip}:${port}`].error ? <span className="text-red-500" title={packetLossMap[`${ip}:${port}`].error}>不可测</span> : <span className={packetLossMap[`${ip}:${port}`].packetLoss === 0 ? 'text-green-600 dark:text-green-400' : packetLossMap[`${ip}:${port}`].packetLoss < 20 ? 'text-amber-600 dark:text-amber-400' : 'text-red-600 dark:text-red-400'}>{packetLossMap[`${ip}:${port}`].packetLoss}% <span className="font-normal text-xs text-gray-500">({packetLossMap[`${ip}:${port}`].received}/{packetLossMap[`${ip}:${port}`].sent})</span></span>) : '-'}</td>

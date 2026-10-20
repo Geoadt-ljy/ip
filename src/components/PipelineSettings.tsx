@@ -74,7 +74,8 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
                         <button type="button" onClick={() => { resetPipelineConfig(); showToast('已恢复默认流水线配置', 'info'); }} disabled={disabled} className="px-2 py-1 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-200">恢复默认</button>
                     </div>
                     <div className="text-[11px] text-gray-500 dark:text-gray-400">当前设置会自动记住（下次打开仍在）；“保存当前”可以存成多套命名配置，方便切换。</div>
-                    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-700 dark:text-gray-200">
+                    <div className="rounded-md border border-gray-200 dark:border-gray-600 p-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-700 dark:text-gray-200">
+                        <div className="w-full font-medium">① 扫描与初筛</div>
                         <label className="flex items-center gap-1">
                             <input type="checkbox" checked={c.latencyOn} onChange={(e) => set({ latencyOn: e.target.checked })} disabled={disabled} />
                             延迟 ≤
@@ -88,46 +89,6 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
                         </label>
                         <label className="flex items-center gap-1">候选数量
                             <input type="number" min={1} max={500} value={c.candidates} onChange={(e) => set({ candidates: e.target.value })} disabled={disabled} className={`w-16 ${numCls}`} />
-                        </label>
-                        <label className="flex items-center gap-1">
-                            <input type="checkbox" checked={c.dlOn} onChange={(e) => set({ dlOn: e.target.checked })} disabled={disabled} />
-                            下载 ≥
-                            <input type="number" min={0} value={c.dlMin} onChange={(e) => set({ dlMin: e.target.value })} disabled={disabled || !c.dlOn} className={`w-16 ${numCls}`} /> Mbps
-                        </label>
-                        <label className="flex items-center gap-1">下载只测延迟前
-                            <input type="number" min={0} max={500} value={c.dlTopN} onChange={(e) => set({ dlTopN: e.target.value })} disabled={disabled} className={`w-14 ${numCls}`} title="先测延迟，只对延迟最好的前 N 个做下载测速；0=全部都测" /> 个（0=全部）
-                        </label>
-                        <label className="flex items-center gap-1">
-                            <input type="checkbox" checked={c.lossOn} onChange={(e) => set({ lossOn: e.target.checked })} disabled={disabled} />
-                            丢包 ≤
-                            <input type="number" min={0} max={100} value={c.lossMax} onChange={(e) => set({ lossMax: e.target.value })} disabled={disabled || !c.lossOn} className={`w-14 ${numCls}`} /> %
-                        </label>
-                        <label className="flex items-center gap-1">测试轮数
-                            <input type="number" min={1} max={10} value={c.rounds} onChange={(e) => set({ rounds: e.target.value })} disabled={disabled} className={`w-14 ${numCls}`} />
-                        </label>
-                        <label className="flex items-center gap-1">复测并发数
-                            <input type="number" min={1} max={10} value={c.retestConcurrency} onChange={(e) => set({ retestConcurrency: e.target.value })} disabled={disabled} className={`w-14 ${numCls}`} title="同时测几个 IP；测下载速度时建议设为 1" /> 个
-                        </label>
-                        <label className="flex items-center gap-1">统计方式
-                            <select value={c.retestStat} onChange={(e) => set({ retestStat: e.target.value as 'mean' | 'median' })} disabled={disabled} className={numCls}>
-                                <option value="mean">平均值</option>
-                                <option value="median">中位数</option>
-                            </select>
-                        </label>
-                        <label className="flex items-center gap-1">最终保留
-                            <input type="number" min={1} max={500} value={c.keep} onChange={(e) => set({ keep: e.target.value })} disabled={disabled} className={`w-16 ${numCls}`} /> 个
-                        </label>
-                        <label className="flex items-center gap-1">排序依据
-                            <select value={c.sortKey} onChange={(e) => set({ sortKey: e.target.value as PipelineSortKey })} disabled={disabled} className={numCls}>
-                                <option value="default">默认（扫描顺序）</option>
-                                <option value="latency">平均延迟（低→高）</option>
-                                <option value="download">下载速度（高→低）</option>
-                                <option value="loss">丢包率（低→高）</option>
-                            </select>
-                        </label>
-                        <label className="flex items-center gap-1">
-                            <input type="checkbox" checked={c.afterScan} onChange={(e) => set({ afterScan: e.target.checked })} />
-                            扫描完成后自动执行优选
                         </label>
                     </div>
                     <div className="flex flex-col gap-2 text-xs text-gray-700 dark:text-gray-200">
@@ -162,6 +123,60 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
                                 <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">点击加入/取消地区；已选地区里第一个数字框是该地区最多保留几个，“下载≥”是该地区单独的下载速度下限（Mbps），留空则使用全局设置。文字写法：HKG:5@20 表示最多 5 个、下载不低于 20。</div>
                             </div>
                         )}
+                    </div>
+                    <div className="rounded-md border border-gray-200 dark:border-gray-600 p-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-700 dark:text-gray-200">
+                        <div className="w-full font-medium">② 达标条件（按复测结果判断；延迟 ≤ 见上面）</div>
+                        <label className="flex items-center gap-1">
+                            <input type="checkbox" checked={c.dlOn} onChange={(e) => set({ dlOn: e.target.checked })} disabled={disabled} />
+                            下载 ≥
+                            <input type="number" min={0} value={c.dlMin} onChange={(e) => set({ dlMin: e.target.value })} disabled={disabled || !c.dlOn} className={`w-16 ${numCls}`} /> Mbps
+                        </label>
+                        <label className="flex items-center gap-1">下载只测延迟前
+                            <input type="number" min={0} max={500} value={c.dlTopN} onChange={(e) => set({ dlTopN: e.target.value })} disabled={disabled} className={`w-14 ${numCls}`} title="先测延迟，只对延迟最好的前 N 个做下载测速；0=全部都测" /> 个（0=全部）
+                        </label>
+                        <label className="flex items-center gap-1">
+                            <input type="checkbox" checked={c.lossOn} onChange={(e) => set({ lossOn: e.target.checked })} disabled={disabled} />
+                            丢包 ≤
+                            <input type="number" min={0} max={100} value={c.lossMax} onChange={(e) => set({ lossMax: e.target.value })} disabled={disabled || !c.lossOn} className={`w-14 ${numCls}`} /> %
+                        </label>
+                    </div>
+                    <div className="rounded-md border border-gray-200 dark:border-gray-600 p-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-700 dark:text-gray-200">
+                        <div className="w-full font-medium">③ 复测设置（对候选 IP 逐项复测，延迟、下载、丢包通用）</div>
+                        <span>复测项目:</span>
+                        <label className="flex items-center gap-1"><input type="checkbox" checked={c.retestLatency} onChange={(e) => set({ retestLatency: e.target.checked })} disabled={disabled} />延迟</label>
+                        <label className="flex items-center gap-1"><input type="checkbox" checked={c.retestDownload} onChange={(e) => set({ retestDownload: e.target.checked })} disabled={disabled} />下载速度</label>
+                        <label className="flex items-center gap-1"><input type="checkbox" checked={c.retestLoss} onChange={(e) => set({ retestLoss: e.target.checked })} disabled={disabled} />丢包率</label>
+                        <label className="flex items-center gap-1">测试轮数
+                            <input type="number" min={1} max={10} value={c.rounds} onChange={(e) => set({ rounds: e.target.value })} disabled={disabled} className={`w-14 ${numCls}`} />
+                        </label>
+                        <label className="flex items-center gap-1">复测并发数
+                            <input type="number" min={1} max={10} value={c.retestConcurrency} onChange={(e) => set({ retestConcurrency: e.target.value })} disabled={disabled} className={`w-14 ${numCls}`} title="同时测几个 IP；测下载速度时建议设为 1" /> 个
+                        </label>
+                        <label className="flex items-center gap-1">统计方式
+                            <select value={c.retestStat} onChange={(e) => set({ retestStat: e.target.value as 'mean' | 'median' })} disabled={disabled} className={numCls}>
+                                <option value="mean">平均值</option>
+                                <option value="median">中位数</option>
+                            </select>
+                        </label>
+                        <div className="w-full text-[11px] text-gray-500 dark:text-gray-400">勾选的项目会对所有候选 IP 复测并显示结果；上面设了达标条件的项目（延迟、下载、丢包）即使没勾选也会自动测。</div>
+                    </div>
+                    <div className="rounded-md border border-gray-200 dark:border-gray-600 p-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-700 dark:text-gray-200">
+                        <div className="w-full font-medium">④ 结果</div>
+                        <label className="flex items-center gap-1">最终保留
+                            <input type="number" min={1} max={500} value={c.keep} onChange={(e) => set({ keep: e.target.value })} disabled={disabled} className={`w-16 ${numCls}`} /> 个
+                        </label>
+                        <label className="flex items-center gap-1">排序依据
+                            <select value={c.sortKey} onChange={(e) => set({ sortKey: e.target.value as PipelineSortKey })} disabled={disabled} className={numCls}>
+                                <option value="default">默认（扫描顺序）</option>
+                                <option value="latency">平均延迟（低→高）</option>
+                                <option value="download">下载速度（高→低）</option>
+                                <option value="loss">丢包率（低→高）</option>
+                            </select>
+                        </label>
+                        <label className="flex items-center gap-1">
+                            <input type="checkbox" checked={c.afterScan} onChange={(e) => set({ afterScan: e.target.checked })} />
+                            扫描完成后自动执行优选
+                        </label>
                     </div>
                     <div className="text-[11px] text-gray-500 dark:text-gray-400">
                         扫描阶段直接使用：延迟上限（覆盖上方“延迟上限”）、地区白名单、每个地区上限（没有地区信息的结果会保留）。优选阶段再按候选数量、下载、丢包、保留个数和排序处理。
