@@ -382,7 +382,7 @@ export async function testBrowserPacketLoss(
     ip: string,
     port: number,
     options: { attempts?: number; timeoutMs?: number; urlTemplate?: string; signal?: AbortSignal } = {},
-): Promise<{ packetLoss: number; sent: number; received: number; error?: string; aborted?: boolean }> {
+): Promise<{ packetLoss: number; sent: number; received: number; error?: string; aborted?: boolean; spikes?: number; jitterMs?: number }> {
     if (isIPv6(ip) || isDomainName(ip)) {
         return { packetLoss: 100, sent: 0, received: 0, error: '浏览器丢包测试目前仅支持 IPv4 IP' };
     }
@@ -399,35 +399,71 @@ export async function testBrowserPacketLoss(
     const urlBase = template.replace(/\{ip\}/g, ip).replace(/\{hexip\}/g, hexIp).replace(/\{port\}/g, String(port));
     let parsedUrl: URL;
     try { parsedUrl = new URL(urlBase); } catch {
-        return { packetLoss: 100, sent: 0, received: 0, error: '探测地址无效；请使用 HTTPS URL' };
+        return { packetLoss: 100, sent: 0, received: 0, error: '丢包测试地址不是有效的 HTTPS URL' };
     }
     if (parsedUrl.protocol !== 'https:') {
-        return { packetLoss: 100, sent: 0, received: 0, error: '浏览器丢包检测地址必须使用 HTTPS' };
+        return { packetLoss: 100, sent: 0, received: 0, error: '丢包测试地址必须使用 HTTPS' };
     }
-    // 被用户中断时探测不完整，得出的丢包率不可信，所以返回 aborted，由调用方丢弃该结果
+    // 被用户中断时返回 aborted，调用方据此丢弃这次不完整的结果
     const abortedResult = (sent: number, got: number) => ({ packetLoss: 100, sent, received: got, error: '已中断', aborted: true });
-    let received = 0;
-    for (let i = 0; i < attempts; i++) {
-        if (options.signal?.aborted) return abortedResult(i, received);
+
+    // 单次探测：成功返回耗时(ms)，失败/超时返回 null
+    const probeOnce = async (tag: string, timeout: number): Promise<number | null> => {
         const controller = new AbortController();
-        const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+        const timer = window.setTimeout(() => controller.abort(), timeout);
         const onExternalAbort = () => controller.abort();
         options.signal?.addEventListener('abort', onExternalAbort, { once: true });
+        const startedAt = performance.now();
         try {
-            const response = await fetch(`${urlBase}?packet_probe=${Date.now()}_${i}_${Math.random().toString(36).slice(2)}`, {
+            const response = await fetch(`${urlBase}?packet_probe=${Date.now()}_${tag}_${Math.random().toString(36).slice(2)}`, {
                 method: 'GET', mode: 'no-cors', cache: 'no-store', credentials: 'omit', signal: controller.signal,
             });
-            // no-cors 响应会是 opaque；fetch 能完成即计为一次 HTTPS 探测成功。
-            if (response.type === 'opaque' || response.ok) received++;
+            // no-cors 下响应为 opaque，fetch 成功即说明 HTTPS 往返完成
+            return response.type === 'opaque' || response.ok ? performance.now() - startedAt : null;
         } catch {
-            // DNS、TLS、连接失败或超时，均计为探测丢失。
+            return null; // DNS、TLS、连接失败或超时
         } finally {
             options.signal?.removeEventListener('abort', onExternalAbort);
             window.clearTimeout(timer);
         }
+    };
+
+    // 预热：先发一次请求建立连接，不计入统计，避免握手耗时把第一次探测误判成丢包
+    await probeOnce('warm', Math.max(timeoutMs, 5000));
+    if (options.signal?.aborted) return abortedResult(0, 0);
+
+    // 正式探测：间隔发送，复用已建立的连接。浏览器看不到 TCP 层丢包，丢包会表现为请求失败，
+    // 或被 TCP 重传拖慢成明显的延迟尖峰，所以两种情况都计为“丢包”。
+    const rtts: number[] = [];
+    let failed = 0;
+    for (let i = 0; i < attempts; i++) {
+        if (options.signal?.aborted) return abortedResult(i, rtts.length);
+        const rtt = await probeOnce(String(i), timeoutMs);
+        if (rtt === null) failed++; else rtts.push(rtt);
+        if (i < attempts - 1) await new Promise<void>(resolve => window.setTimeout(resolve, 100));
     }
-    if (options.signal?.aborted) return abortedResult(attempts, received);
-    return { packetLoss: Number((((attempts - received) / attempts) * 100).toFixed(1)), sent: attempts, received };
+    if (options.signal?.aborted) return abortedResult(attempts, rtts.length);
+
+    let spikes = 0;
+    let jitterMs = 0;
+    if (rtts.length >= 3) {
+        const sorted = [...rtts].sort((a, b) => a - b);
+        const median = sorted[Math.floor(sorted.length / 2)];
+        // 比中位数高出 max(150ms, 1.5 倍中位数) 以上，视为被重传拖慢（略高于 TCP 最小重传超时）
+        const spikeGap = Math.max(150, median * 1.5);
+        spikes = rtts.filter(r => r - median > spikeGap).length;
+        let diff = 0;
+        for (let i = 1; i < rtts.length; i++) diff += Math.abs(rtts[i] - rtts[i - 1]);
+        jitterMs = Math.round(diff / (rtts.length - 1));
+    }
+    const received = Math.max(0, rtts.length - spikes);
+    return {
+        packetLoss: Number((((attempts - received) / attempts) * 100).toFixed(1)),
+        sent: attempts,
+        received,
+        spikes,
+        jitterMs,
+    };
 }
 
 export async function probeBrowserAvailable(sampleIps?: string[], attempts = 10): Promise<boolean> {
