@@ -218,7 +218,7 @@ export interface BrowserDownloadOptions {
 export async function testBrowserDownloadSpeed(
     ip: string,
     port: number,
-    options: { bytes?: number; timeoutMs?: number; urlTemplate?: string; signal?: AbortSignal } = {}
+    options: { bytes?: number; timeoutMs?: number; urlTemplate?: string; signal?: AbortSignal; mode?: 'size' | 'time'; durationMs?: number; skipMs?: number } = {}
 ): Promise<{ downloadMbps: number; downloadBytes: number; downloadMs: number; error?: string; aborted?: boolean; partial?: boolean }> {
     // 外部（用户点击“中断”）触发的取消：立即返回，不当作测速失败记录。
     const abortedResult = { downloadMbps: 0, downloadBytes: 0, downloadMs: 0, error: '已中断', aborted: true };
@@ -243,8 +243,12 @@ export async function testBrowserDownloadSpeed(
         };
     }
 
-    const bytes = Math.max(1024 * 1024, Math.min(options.bytes ?? 25 * 1024 * 1024, 100 * 1024 * 1024));
-    const timeoutMs = Math.max(5000, options.timeoutMs ?? 30000);
+    // 限时模式：固定测 durationMs，请求最大文件，到时间就停；忽略开头 skipMs（TCP 慢启动）后按稳定阶段算速度
+    const timeMode = options.mode === 'time';
+    const durationMs = Math.max(2000, Math.min(20000, options.durationMs ?? 6000));
+    const skipMs = Math.min(options.skipMs ?? 500, durationMs / 2);
+    const bytes = timeMode ? 100 * 1024 * 1024 : Math.max(1024 * 1024, Math.min(options.bytes ?? 25 * 1024 * 1024, 100 * 1024 * 1024));
+    const timeoutMs = Math.max(timeMode ? durationMs + 10000 : 5000, options.timeoutMs ?? 30000);
     const templates = options.urlTemplate
         ? [options.urlTemplate]
         : orderedTestDomains().map(domain => `https://{hexip}.${domain}:{port}/__down?bytes={bytes}`);
@@ -290,6 +294,9 @@ export async function testBrowserDownloadSpeed(
         let receivedBytes = 0;
         let firstChunkAt = 0;
         let bytesAfterFirst = 0;
+        let skipMarked = false;
+        let bytesAtSkip = 0;
+        let tSkip = 0;
         try {
             // 必须使用可读取响应体的 CORS 请求并统计实际字节；opaque/no-cors 只能测到响应头时间，
             // 不能据此推算下载速度。若测速域不允许 CORS，则明确报错并尝试下一个候选地址。
@@ -316,6 +323,11 @@ export async function testBrowserDownloadSpeed(
                             receivedBytes += value.byteLength;
                             if (!firstChunkAt) firstChunkAt = performance.now();
                             else bytesAfterFirst += value.byteLength;
+                            if (timeMode && firstChunkAt) {
+                                const t = performance.now();
+                                if (!skipMarked && t - firstChunkAt >= skipMs) { skipMarked = true; bytesAtSkip = receivedBytes; tSkip = t; }
+                                if (t - firstChunkAt >= durationMs) { await reader.cancel().catch(() => undefined); break; }
+                            }
                             // 自定义地址即使忽略 bytes 参数，也限制本次最多接收约定的测速样本量。
                             if (receivedBytes >= bytes) {
                                 await reader.cancel().catch(() => undefined);
@@ -338,15 +350,19 @@ export async function testBrowserDownloadSpeed(
                 lastError = '测速端点未返回可读取的数据；请换一个支持 CORS 的测速地址';
                 continue;
             }
-            const mbps = dataMs > 0
-                ? (bytesAfterFirst * 8) / (dataMs / 1000) / 1_000_000
-                : (receivedBytes * 8) / (elapsedMs / 1000) / 1_000_000;
+            // 限时模式且稳定阶段至少有 0.5 秒：只用稳定阶段算速度
+            const windowMs = timeMode && skipMarked ? nowMs - tSkip : 0;
+            const mbps = windowMs >= 500
+                ? ((receivedBytes - bytesAtSkip) * 8) / (windowMs / 1000) / 1_000_000
+                : dataMs > 0
+                    ? (bytesAfterFirst * 8) / (dataMs / 1000) / 1_000_000
+                    : (receivedBytes * 8) / (elapsedMs / 1000) / 1_000_000;
             const hostDomain = TEST_DOMAIN_CANDIDATES.find(domain => url.hostname.endsWith(`.${domain}`));
             if (hostDomain) cacheTestDomain(hostDomain);
             return {
                 downloadMbps: Number(mbps.toFixed(2)),
                 downloadBytes: receivedBytes,
-                downloadMs: Math.round(dataMs > 0 ? dataMs : elapsedMs),
+                downloadMs: Math.round(windowMs >= 500 ? windowMs : dataMs > 0 ? dataMs : elapsedMs),
             };
         } catch (error: any) {
             if (options.signal?.aborted) return abortedResult;
@@ -490,6 +506,7 @@ export class BatchScanner {
     // 单次探测的超时：要覆盖首次连接（DNS + TCP + TLS）和之后计时的第二次请求，不能直接用延迟上限，否则低延迟上限会误判大量 IP 失败
     private connectTimeout: number;
     private retryFailed: boolean;
+    private borderRecheck: boolean;
     private onProgress: (result: ScanResult) => void;
     private onComplete: (results: ScanResult[]) => void;
     private abortController: AbortController;
@@ -506,9 +523,11 @@ export class BatchScanner {
         onProgress: (result: ScanResult) => void,
         onComplete: (results: ScanResult[]) => void,
         resolvedMap?: Record<string, string | null>,
-        retryFailed = false
+        retryFailed = false,
+        borderRecheck = false
     ) {
         this.retryFailed = retryFailed;
+        this.borderRecheck = borderRecheck;
         this.ips = ips;
         this.port = port;
         this.threads = Math.min(ips.length, threads);
@@ -611,6 +630,21 @@ export class BatchScanner {
                     && (probe.latency <= 0 || (probe.latency > this.latencyLimit && probe.latency <= this.latencyLimit * 1.5))) {
                     const again = await testIpLatency(testHost, port, this.connectTimeout);
                     if (again.latency > 0 && (probe.latency <= 0 || again.latency < probe.latency)) probe = again;
+                }
+                // 临界值再确认：延迟落在上限 ±10% 内时，再测两次取中位数，避免单次抖动决定去留
+                if (this.borderRecheck && !this.abortController.signal.aborted && probe.latency > 0
+                    && probe.latency >= this.latencyLimit * 0.9 && probe.latency <= this.latencyLimit * 1.1) {
+                    const samples = [probe.latency];
+                    for (let k = 0; k < 2 && !this.abortController.signal.aborted; k++) {
+                        const extra = await testIpLatency(testHost, port, this.connectTimeout);
+                        if (extra.latency > 0) samples.push(extra.latency);
+                    }
+                    if (samples.length >= 2) {
+                        samples.sort((a, b) => a - b);
+                        const m = Math.floor(samples.length / 2);
+                        const med = samples.length % 2 ? samples[m] : Math.round((samples[m - 1] + samples[m]) / 2);
+                        probe = { latency: med, colo: probe.colo };
+                    }
                 }
                 const { latency, colo } = probe;
 

@@ -58,6 +58,7 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
     const [pipe] = usePipelineConfig(); // 流水线统一配置（总开关开启时接管延迟上限）
     const pipeLatency = pipe.enabled && pipe.latencyOn ? Math.floor(Number(pipe.latencyMax)) : 0;
     const latencyOverride = Number.isFinite(pipeLatency) && pipeLatency > 0 ? pipeLatency : 0;
+    const [borderRecheck, setBorderRecheck] = useState(true); // 延迟接近上限时再测两次取中位数
     const [retryFailed, setRetryFailed] = useState(true); // 扫描时失败或略高于上限的 IP 重试一次
     const [fullCidr, setFullCidr] = useState(false); // 自定义网段：测试网段内全部 IP
     const [stratified, setStratified] = useState(false); // 分层筛选：先每个 /24 抽样，再精测最优 /24
@@ -580,7 +581,7 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
                 setStage({ no: 1, text: `阶段 1/2：抽样粗筛 ${blocks.length} 个 /24` });
                 const stage1: ScanResult[] = [];
                 const s1 = new BatchScanner(targets, port, val.threadsNum, val.latencyLimitNum,
-                    (r) => { stage1.push(r); onProgress(r); }, () => { }, prepared.resolvedMap, retryFailed);
+                    (r) => { stage1.push(r); onProgress(r); }, () => { }, prepared.resolvedMap, retryFailed, borderRecheck);
                 scannerRef.current = s1;
                 await s1.run();
 
@@ -601,7 +602,7 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
                         if (stage2.length > 0) {
                             setTotal(targets.length + stage2.length);
                             setStage({ no: 2, text: `阶段 2/2：精测最优 ${ranked.length} 个 /24（${stage2.length} 个 IP）` });
-                            const s2 = new BatchScanner(stage2, port, val.threadsNum, val.latencyLimitNum, onProgress, () => { }, undefined, retryFailed);
+                            const s2 = new BatchScanner(stage2, port, val.threadsNum, val.latencyLimitNum, onProgress, () => { }, undefined, retryFailed, borderRecheck);
                             scannerRef.current = s2;
                             await s2.run();
                         }
@@ -640,6 +641,7 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
                     onComplete,
                     prepared.resolvedMap,
                     retryFailed,
+                    borderRecheck,
                 );
                 scannerRef.current = scanner;
 
@@ -1049,6 +1051,11 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
             <label className="mb-3 flex flex-wrap items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
                 <input type="checkbox" checked={retryFailed} onChange={(e) => setRetryFailed(e.target.checked)} disabled={isScanning || isPreparing} />
                 <span>失败重试一次（失败或略高于延迟上限时再测一次取更好值，结果更准，但死 IP 多时更慢）</span>
+            </label>
+
+            <label className="mb-3 flex flex-wrap items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                <input type="checkbox" checked={borderRecheck} onChange={(e) => setBorderRecheck(e.target.checked)} disabled={isScanning || isPreparing} />
+                <span>临界值再确认（延迟在上限 ±10% 内时再测两次取中位数，避免单次抖动决定去留；这类 IP 会多花两次测试时间）</span>
             </label>
 
             <PipelineSettings disabled={isScanning || isPreparing} />

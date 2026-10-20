@@ -68,6 +68,13 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
     const avgRounds = pipe.rounds;
     const sortKey = pipe.sortKey;
     const setAvgRounds = (v: string) => setPipe({ rounds: v });
+    // 下载测速选项：按文件大小或限时（手动测速、平均值测试和自动优选共用）。始终只测所指定的那个端口
+    const downloadOptions = () => {
+        const sec = Number(pipe.dlSeconds);
+        return pipe.dlMode === 'time'
+            ? { mode: 'time' as const, durationMs: Math.round((Number.isFinite(sec) ? Math.max(2, Math.min(20, sec)) : 6) * 1000), skipMs: 500 }
+            : {};
+    };
     const setSortKey = (k: PipelineSortKey) => setPipe({ sortKey: k });
     const autoRanRef = useRef<ScanResult[] | null>(null);
     // 导出配置
@@ -321,6 +328,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                             ? 'https://{hexip}.bestcf.cmliussss.hidns.vip:{port}/__down?bytes={bytes}'
                             : downloadTestAddress === 'custom' ? customDownloadUrlTemplate.trim() : undefined;
                     const result = await testBrowserDownloadSpeed(target.ip, target.port, {
+                        ...downloadOptions(),
                         bytes: downloadBytes,
                         timeoutMs: 30000,
                         signal,
@@ -413,6 +421,9 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         avgAbortRef.current = controller;
         const signal = controller.signal;
         const data: Record<string, Measured> = {};
+        // 复测设置：同时测几个 IP（并发数）和统计方式（平均值/中位数），多轮平均测试与自动优选共用
+        const concurrency = Math.floor(num(pipe.retestConcurrency, 3, 1, 10));
+        const useMedian = pipe.retestStat === 'median';
         setIsAvgTesting(true);
         setAvgDone(0);
         setAvgTotal(targets.length);
@@ -442,6 +453,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                         }
                         if (metrics.download && !signal.aborted) {
                             const r = await testBrowserDownloadSpeed(target.ip, target.port, {
+                                ...downloadOptions(),
                                 bytes: downloadBytes,
                                 timeoutMs: 20000,
                                 signal,
@@ -458,7 +470,13 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                     }
                     // 被中断的目标数据不完整，不记录
                     if (interrupted || signal.aborted) return;
-                    const mean = (a: number[]) => a.reduce((x, y) => x + y, 0) / a.length;
+                    // 统计方式：中位数不受个别异常值影响，平均值反映整体水平
+                    const mean = (a: number[]) => {
+                        if (!useMedian) return a.reduce((x, y) => x + y, 0) / a.length;
+                        const sorted = [...a].sort((x, y) => x - y);
+                        const mid = Math.floor(sorted.length / 2);
+                        return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+                    };
                     // 成功的轮数不到一半时不给平均值，避免只靠个别成功轮次得出过于乐观的结果
                     const needOk = Math.max(1, Math.ceil(rounds / 2));
                     const m: Measured = {};
@@ -477,7 +495,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                     setAvgDone(done);
                 }
             };
-            await Promise.all(Array.from({ length: Math.min(3, targets.length) }, () => worker()));
+            await Promise.all(Array.from({ length: Math.min(concurrency, targets.length) }, () => worker()));
         } finally {
             setIsAvgTesting(false);
             setSpeedPending({});
@@ -746,6 +764,35 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                                     <button onClick={abortPacketLoss} title="立即中止丢包测试" className="px-3 py-1 text-xs font-medium rounded-full bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/40 dark:text-red-300">■ 中断丢包测试</button>
                                 )}
                                 <button onClick={() => { setBrowserSpeedMap({}); setBrowserSpeedErrors({}); setPacketLossMap({}); setAvgLatencyMap({}); setSelectedSpeedTargets(new Set()); }} disabled={isBrowserSpeedTesting || (Object.keys(browserSpeedMap).length === 0 && Object.keys(browserSpeedErrors).length === 0 && Object.keys(packetLossMap).length === 0)} className="px-3 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-600 dark:text-gray-200 dark:hover:bg-gray-500">清除测速结果</button>
+                                <div className="w-full rounded-lg border border-gray-200 dark:border-gray-600 p-3 flex flex-col gap-2 text-xs text-gray-700 dark:text-gray-200">
+                                    <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                                        <label className="flex items-center gap-1">复测并发数
+                                            <input type="number" min={1} max={10} value={pipe.retestConcurrency} onChange={(e) => setPipe({ retestConcurrency: e.target.value })} disabled={isAvgTesting || autoRunning} className="w-14 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5" /> 个
+                                        </label>
+                                        <label className="flex items-center gap-1">统计方式
+                                            <select value={pipe.retestStat} onChange={(e) => setPipe({ retestStat: e.target.value as 'mean' | 'median' })} disabled={isAvgTesting || autoRunning} className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5">
+                                                <option value="mean">平均值</option>
+                                                <option value="median">中位数</option>
+                                            </select>
+                                        </label>
+                                        <label className="flex items-center gap-1">下载方式
+                                            <select value={pipe.dlMode} onChange={(e) => setPipe({ dlMode: e.target.value as 'size' | 'time' })} disabled={isBrowserSpeedTesting || isAvgTesting || autoRunning} className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5">
+                                                <option value="size">按文件大小</option>
+                                                <option value="time">限时测速</option>
+                                            </select>
+                                        </label>
+                                        {pipe.dlMode === 'time' && (
+                                            <label className="flex items-center gap-1">时长
+                                                <input type="number" min={2} max={20} value={pipe.dlSeconds} onChange={(e) => setPipe({ dlSeconds: e.target.value })} disabled={isBrowserSpeedTesting || isAvgTesting || autoRunning} className="w-14 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5" /> 秒
+                                            </label>
+                                        )}
+                                    </div>
+                                    <div className="text-[11px] leading-5 text-gray-500 dark:text-gray-400">
+                                        <p>复测并发数：同时测几个 IP，1～10。数值大速度快，但并发会互相抢带宽和 CPU，延迟偏高、下载速度偏低；数值小更准但更慢。测下载速度时建议设为 1。</p>
+                                        <p>统计方式：平均值＝各轮结果取均值，反映整体水平，但一次异常抖动会拉偏；中位数＝各轮结果取中间值，不受个别异常值影响，更稳，适合轮数 3 轮以上时使用。以上设置对“多轮平均测试”和“自动优选”都生效。</p>
+                                        <p>下载方式：按文件大小＝每次下载固定大小（见下方“文件大小”），快的 IP 很快测完，慢的 IP 要等很久，流量不固定；限时测速＝固定测设定的秒数，忽略前 0.5 秒慢启动，只用稳定阶段算速度，每个 IP 用时一致、更可比，慢 IP 也不会拖很久。</p>
+                                    </div>
+                                </div>
                                 <div className="flex items-center gap-3 flex-wrap w-full">
                                     <label className="flex items-center gap-1.5 text-xs font-medium text-gray-700 dark:text-gray-200 cursor-pointer">
                                         <input type="checkbox" checked={avgEnabled} onChange={(e) => setAvgEnabled(e.target.checked)} disabled={isAvgTesting} />

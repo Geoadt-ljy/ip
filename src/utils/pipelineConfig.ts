@@ -23,6 +23,10 @@ export interface PipelineConfig {
     keep: string;           // 最终保留个数
     rounds: string;         // 多轮平均测试轮数
     sortKey: PipelineSortKey;
+    retestConcurrency: string;    // 复测并发数（同时测几个 IP）
+    retestStat: 'mean' | 'median'; // 复测统计方式：平均值 / 中位数
+    dlMode: 'size' | 'time';      // 下载方式：size=按文件大小；time=限时测速
+    dlSeconds: string;            // 限时测速的时长（秒）
 }
 
 const KEY = 'ip-main:pipeline-config';
@@ -42,6 +46,10 @@ const DEFAULTS: PipelineConfig = {
     keep: '20',
     rounds: '3',
     sortKey: 'default',
+    retestConcurrency: '3',
+    retestStat: 'mean',
+    dlMode: 'size',
+    dlSeconds: '6',
 };
 
 function load(): PipelineConfig {
