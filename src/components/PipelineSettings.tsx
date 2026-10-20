@@ -105,6 +105,15 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
                         <label className="flex items-center gap-1">测试轮数
                             <input type="number" min={1} max={10} value={c.rounds} onChange={(e) => set({ rounds: e.target.value })} disabled={disabled} className={`w-14 ${numCls}`} />
                         </label>
+                        <label className="flex items-center gap-1">复测并发数
+                            <input type="number" min={1} max={10} value={c.retestConcurrency} onChange={(e) => set({ retestConcurrency: e.target.value })} disabled={disabled} className={`w-14 ${numCls}`} title="同时测几个 IP；测下载速度时建议设为 1" /> 个
+                        </label>
+                        <label className="flex items-center gap-1">统计方式
+                            <select value={c.retestStat} onChange={(e) => set({ retestStat: e.target.value as 'mean' | 'median' })} disabled={disabled} className={numCls}>
+                                <option value="mean">平均值</option>
+                                <option value="median">中位数</option>
+                            </select>
+                        </label>
                         <label className="flex items-center gap-1">最终保留
                             <input type="number" min={1} max={500} value={c.keep} onChange={(e) => set({ keep: e.target.value })} disabled={disabled} className={`w-16 ${numCls}`} /> 个
                         </label>
