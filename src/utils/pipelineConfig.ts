@@ -4,6 +4,7 @@
  */
 import { useSyncExternalStore } from 'react';
 import type { ScanResult } from './scanner';
+import { getPipelinePresets, savePipelinePresets } from '../api';
 
 export type PipelineSortKey = 'default' | 'latency' | 'download' | 'loss';
 
@@ -125,11 +126,41 @@ export function usePipelinePresets(): Record<string, PipelinePreset> {
     return useSyncExternalStore(subscribePresets, getPresets);
 }
 
-/** 保存当前配置为预设（同名覆盖） */
-export function savePipelinePreset(name: string): void {
+export interface PresetSyncResult { cloud: boolean; error?: string }
+
+const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const asCloud = (p: Record<string, PipelinePreset>) => p as unknown as Record<string, Record<string, unknown>>;
+
+/** 保存当前配置为预设（同名覆盖）：先本地生效，再合并云端最新数据后写入云端 KV */
+export async function savePipelinePreset(name: string): Promise<PresetSyncResult> {
     const rest: Partial<PipelineConfig> = { ...state };
     delete rest.enabled;
-    commitPresets({ ...presets, [name]: rest as PipelinePreset });
+    const preset = rest as PipelinePreset;
+    commitPresets({ ...presets, [name]: preset });
+    try {
+        const remote = (await getPipelinePresets()) as unknown as Record<string, PipelinePreset>;
+        const next = { ...remote, [name]: preset };
+        await savePipelinePresets(asCloud(next));
+        commitPresets(next);
+        return { cloud: true };
+    } catch (e) {
+        return { cloud: false, error: errText(e) };
+    }
+}
+
+/** 首次/定期从云端拉取预设；云端为空而本地已有时，把本地的迁移上去 */
+export async function syncPipelinePresetsFromCloud(): Promise<PresetSyncResult & { migrated?: boolean }> {
+    try {
+        const remote = (await getPipelinePresets()) as unknown as Record<string, PipelinePreset>;
+        if (Object.keys(remote).length === 0 && Object.keys(presets).length > 0) {
+            await savePipelinePresets(asCloud(presets));
+            return { cloud: true, migrated: true };
+        }
+        commitPresets(remote);
+        return { cloud: true };
+    } catch (e) {
+        return { cloud: false, error: errText(e) };
+    }
 }
 
 /** 载入预设（不改变总开关）；缺失的字段用默认值补齐 */
@@ -140,10 +171,20 @@ export function loadPipelinePreset(name: string): boolean {
     return true;
 }
 
-export function deletePipelinePreset(name: string): void {
-    const next = { ...presets };
-    delete next[name];
-    commitPresets(next);
+export async function deletePipelinePreset(name: string): Promise<PresetSyncResult> {
+    const local = { ...presets };
+    delete local[name];
+    commitPresets(local);
+    try {
+        const remote = (await getPipelinePresets()) as unknown as Record<string, PipelinePreset>;
+        const next = { ...remote };
+        delete next[name];
+        await savePipelinePresets(asCloud(next));
+        commitPresets(next);
+        return { cloud: true };
+    } catch (e) {
+        return { cloud: false, error: errText(e) };
+    }
 }
 
 export interface RegionRule { code: string; limit?: number; dlMin?: number }

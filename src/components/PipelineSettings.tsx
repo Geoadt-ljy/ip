@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { usePipelineConfig, usePipelinePresets, savePipelinePreset, loadPipelinePreset, deletePipelinePreset, resetPipelineConfig, parseRegionRules, stringifyRegionRules, type PipelineSortKey } from '../utils/pipelineConfig';
+import { useEffect, useState } from 'react';
+import { usePipelineConfig, usePipelinePresets, savePipelinePreset, loadPipelinePreset, deletePipelinePreset, syncPipelinePresetsFromCloud, resetPipelineConfig, parseRegionRules, stringifyRegionRules, type PipelineSortKey } from '../utils/pipelineConfig';
 import { useToast } from './Toast';
 import { coloMap, getColoText } from '../utils/colo';
 
@@ -13,22 +13,37 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
     const [presetName, setPresetName] = useState('');
     const [presetSel, setPresetSel] = useState('');
     const [showTable, setShowTable] = useState(false);
-    const handleSavePreset = () => {
+    const [cloudStatus, setCloudStatus] = useState<'checking' | 'ok' | 'local'>('checking');
+    // 进入页面时从云端 KV 拉取已保存的配置（云端为空而本地已有时自动迁移上去）
+    useEffect(() => {
+        let alive = true;
+        void syncPipelinePresetsFromCloud().then(r => {
+            if (!alive) return;
+            setCloudStatus(r.cloud ? 'ok' : 'local');
+            if (r.migrated) showToast('已把本地的流水线配置同步到云端', 'success');
+        });
+        return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+    const handleSavePreset = async () => {
         const name = presetName.trim();
         if (!name) { showToast('请输入配置名称', 'warning'); return; }
-        savePipelinePreset(name);
         setPresetSel(name);
-        showToast(`流水线配置“${name}”已保存`, 'success');
+        const r = await savePipelinePreset(name);
+        setCloudStatus(r.cloud ? 'ok' : 'local');
+        showToast(r.cloud ? `流水线配置“${name}”已保存到云端` : `云端保存失败（${r.error || '未知错误'}），已仅保存在本地`, r.cloud ? 'success' : 'warning');
     };
     const handleLoadPreset = () => {
         if (!presetSel || !loadPipelinePreset(presetSel)) { showToast('请先选择一个已保存的配置', 'warning'); return; }
         showToast(`已载入流水线配置“${presetSel}”`, 'success');
     };
-    const handleDeletePreset = () => {
+    const handleDeletePreset = async () => {
         if (!presetSel) return;
-        deletePipelinePreset(presetSel);
-        showToast(`已删除流水线配置“${presetSel}”`, 'success');
+        const name = presetSel;
         setPresetSel('');
+        const r = await deletePipelinePreset(name);
+        setCloudStatus(r.cloud ? 'ok' : 'local');
+        showToast(r.cloud ? `已删除流水线配置“${name}”（云端已同步）` : `云端同步失败（${r.error || '未知错误'}），仅本地已删除`, r.cloud ? 'success' : 'warning');
     };
     const [query, setQuery] = useState('');
     const rules = parseRegionRules(c.regions);
@@ -68,12 +83,12 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
                             {Object.keys(presets).map(n => <option key={n} value={n}>{n}</option>)}
                         </select>
                         <button type="button" onClick={handleLoadPreset} disabled={disabled || !presetSel} className="px-2 py-1 rounded-full bg-blue-100 text-blue-700 hover:bg-blue-200 disabled:opacity-50 dark:bg-blue-900/40 dark:text-blue-300">载入</button>
-                        <button type="button" onClick={handleDeletePreset} disabled={disabled || !presetSel} className="px-2 py-1 rounded-full bg-red-100 text-red-700 hover:bg-red-200 disabled:opacity-50 dark:bg-red-900/40 dark:text-red-300">删除</button>
+                        <button type="button" onClick={() => void handleDeletePreset()} disabled={disabled || !presetSel} className="px-2 py-1 rounded-full bg-red-100 text-red-700 hover:bg-red-200 disabled:opacity-50 dark:bg-red-900/40 dark:text-red-300">删除</button>
                         <input type="text" value={presetName} onChange={(e) => setPresetName(e.target.value)} placeholder="配置名称" disabled={disabled} className={`w-28 ${numCls}`} />
-                        <button type="button" onClick={handleSavePreset} disabled={disabled} className="px-2 py-1 rounded-full bg-emerald-100 text-emerald-700 hover:bg-emerald-200 disabled:opacity-50 dark:bg-emerald-900/40 dark:text-emerald-300">保存当前</button>
+                        <button type="button" onClick={() => void handleSavePreset()} disabled={disabled} className="px-2 py-1 rounded-full bg-emerald-100 text-emerald-700 hover:bg-emerald-200 disabled:opacity-50 dark:bg-emerald-900/40 dark:text-emerald-300">保存当前</button>
                         <button type="button" onClick={() => { resetPipelineConfig(); showToast('已恢复默认流水线配置', 'info'); }} disabled={disabled} className="px-2 py-1 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-200">恢复默认</button>
                     </div>
-                    <div className="text-[11px] text-gray-500 dark:text-gray-400">当前设置会自动记住（下次打开仍在）；“保存当前”可以存成多套命名配置，方便切换。</div>
+                    <div className="text-[11px] text-gray-500 dark:text-gray-400">当前设置会自动记住（本浏览器）；“保存当前”会把命名配置保存到云端 KV，换设备也能载入。{cloudStatus === 'checking' ? ' 云端：连接中…' : cloudStatus === 'ok' ? ' 云端：已同步' : ' 云端：不可用，仅本地保存（请确认已登录）'}</div>
                     <div className="rounded-md border border-gray-200 dark:border-gray-600 p-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-700 dark:text-gray-200">
                         <div className="w-full font-medium">① 扫描与初筛</div>
                         <label className="flex items-center gap-1">

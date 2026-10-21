@@ -318,3 +318,18 @@ export async function renameScene(from: string, to: string): Promise<void> {
     markSceneDeleted(from);
     markSceneAdded(to);
 }
+
+// ---------- 流水线配置预设（云端 KV） ----------
+export async function getPipelinePresets(): Promise<Record<string, Record<string, unknown>>> {
+    const data = await handleResponse<Record<string, Record<string, unknown>>>(await authedFetch(`/api/pipeline_presets?t=${Date.now()}`));
+    return data || {};
+}
+
+export async function savePipelinePresets(presets: Record<string, Record<string, unknown>>): Promise<void> {
+    const response = await authedFetch('/api/pipeline_presets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(presets),
+    });
+    return handleResponse<void>(response);
+}
