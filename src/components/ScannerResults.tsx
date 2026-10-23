@@ -552,7 +552,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         if (isAvgTesting || isBrowserSpeedTesting || isPacketLossTesting || autoRunning) return;
         const latMax = autoLatencyOn ? num(autoLatencyMax, 300, 1, 100000) : Infinity;
         const perRegion = Math.floor(num(autoPerRegion, 0, 0, 1000));
-        const candN = Math.floor(num(autoCandidates, 30, 1, 500));
+        const candN = Math.floor(num(autoCandidates, 30, 0, 100000)); // 0=不限
         const keepN = Math.floor(num(autoKeep, 20, 1, 500));
         const dlMin = num(autoDlMin, 10, 0, 100000);
         const lossMax = num(autoLossMax, 10, 0, 100);
@@ -575,7 +575,9 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                     && (selectedRegions.size === 0 || !r.colo || selectedRegions.has(r.colo))
                     && (regionList.length === 0 || !r.colo || regionList.includes(r.colo.toUpperCase())))
                 .sort((a, b) => a.latency - b.latency);
-            candidates = capByRegion(pool, perRegion, limits).slice(0, candN);
+            const capped = capByRegion(pool, perRegion, limits);
+            candidates = candN > 0 ? capped.slice(0, candN) : capped;
+            if (candN === 0 && candidates.length > 300) showToast(`候选数量不限，共 ${candidates.length} 个 IP 进入复测，会比较久`, 'info');
             if (candidates.length === 0) {
                 showToast('没有符合初筛条件的 IP，请放宽延迟上限或地区/端口选择', 'warning');
                 return;
@@ -890,14 +892,17 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                                         <span className="text-gray-500 dark:text-gray-400">流水线未启用（可在“扫描配置”里打开）</span>
                                     )}
                                     {autoStageText && <span className="text-indigo-600 dark:text-indigo-300">{autoStageText}</span>}
-                                    <label className="flex items-center gap-1">
-                                        <input type="checkbox" checked={pipe.showFullResult} onChange={(e) => setPipe({ showFullResult: e.target.checked })} />
-                                        显示完整优选结果（成功和失败的都显示）
-                                    </label>
+                                    <button
+                                        type="button"
+                                        onClick={() => setPipe({ showFullResult: !pipe.showFullResult })}
+                                        disabled={!pipelineView}
+                                        title={pipelineView ? '在优选结果里同时显示成功和失败的候选，失败的会标出淘汰原因；再点一次只看达标的' : '先运行一次优选后可用'}
+                                        className={`px-3 py-1 text-xs font-medium rounded-full disabled:opacity-50 ${pipe.showFullResult ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600'}`}
+                                    >{pipe.showFullResult ? '✓ 显示所有结果（含失败）' : '显示所有结果（含失败）'}</button>
                                     {pipelineView && (
                                         <span className="text-gray-500 dark:text-gray-400">
-                                            优选视图：达标 {pipelineView.passed.size} / 候选 {pipelineView.candidates.size}，当前显示{pipe.showFullResult ? '全部候选' : '仅达标'}
-                                            <button type="button" onClick={() => setPipelineView(null)} className="ml-2 underline">显示全部扫描结果</button>
+                                            优选结果：达标 {pipelineView.passed.size} / 候选 {pipelineView.candidates.size}，当前{pipe.showFullResult ? '显示全部候选' : '只显示达标'}
+                                            <button type="button" onClick={() => setPipelineView(null)} className="ml-2 underline">退出优选视图</button>
                                         </span>
                                     )}
                                     <label className="flex items-center gap-1">排序

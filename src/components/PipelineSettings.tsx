@@ -103,7 +103,7 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
                             <input type="number" min={0} max={1000} value={c.perRegion} onChange={(e) => set({ perRegion: e.target.value })} disabled={disabled} className={`w-14 ${numCls}`} /> 个（0=不限）
                         </label>
                         <label className="flex items-center gap-1">候选数量
-                            <input type="number" min={1} max={500} value={c.candidates} onChange={(e) => set({ candidates: e.target.value })} disabled={disabled} className={`w-16 ${numCls}`} />
+                            <input type="number" min={0} max={100000} value={c.candidates} onChange={(e) => set({ candidates: e.target.value })} disabled={disabled} className={`w-20 ${numCls}`} title="0=不限：对所有符合延迟条件的 IP 都进入复测，数量多时会比较久" /> 个（0=不限）
                         </label>
                     </div>
                     <div className="flex flex-col gap-2 text-xs text-gray-700 dark:text-gray-200">
@@ -187,10 +187,6 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
                                 <option value="download">下载速度（高→低）</option>
                                 <option value="loss">丢包率（低→高）</option>
                             </select>
-                        </label>
-                        <label className="flex items-center gap-1">
-                            <input type="checkbox" checked={c.showFullResult} onChange={(e) => set({ showFullResult: e.target.checked })} />
-                            显示完整优选结果（成功和失败的都显示，失败的标出原因）
                         </label>
                         <label className="flex items-center gap-1">
                             <input type="checkbox" checked={c.afterScan} onChange={(e) => set({ afterScan: e.target.checked })} />
