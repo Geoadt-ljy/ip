@@ -6,7 +6,7 @@ const KV_KEY = 'pipeline_presets';
 const MAX_PRESETS = 30;
 const MAX_BODY_BYTES = 100 * 1024;
 
-const BOOL_KEYS = ['afterScan', 'latencyOn', 'dlOn', 'lossOn', 'retestLatency', 'retestDownload', 'retestLoss'];
+const BOOL_KEYS = ['afterScan', 'latencyOn', 'dlOn', 'lossOn', 'retestLatency', 'retestDownload', 'retestLoss', 'showFullResult'];
 const STR_KEYS = ['candidates', 'latencyMax', 'regions', 'perRegion', 'dlMin', 'dlTopN', 'lossMax', 'keep', 'rounds', 'retestConcurrency', 'dlSeconds'];
 const ENUMS: Record<string, string[]> = {
     sortKey: ['default', 'latency', 'download', 'loss'],

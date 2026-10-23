@@ -69,7 +69,7 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
         <div className="mb-4 w-full rounded-lg border border-gray-200 dark:border-gray-600 p-3 flex flex-col gap-2">
             <label className="flex items-center gap-1.5 text-sm font-bold text-gray-700 dark:text-gray-200 cursor-pointer">
                 <input type="checkbox" checked={c.enabled} onChange={(e) => set({ enabled: e.target.checked })} disabled={disabled} />
-                启用流水线（扫描 → 筛选 → 多轮平均测试 → 排序勾选）
+                启用流水线（测延迟 → 测丢包 → 测下载，逐级筛选 → 排序勾选）
             </label>
             {!c.enabled && (
                 <div className="text-[11px] text-gray-500 dark:text-gray-400">未启用时按上方常规设置扫描，结果列表里的"自动优选"也不可用。</div>
@@ -140,7 +140,7 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
                         )}
                     </div>
                     <div className="rounded-md border border-gray-200 dark:border-gray-600 p-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-700 dark:text-gray-200">
-                        <div className="w-full font-medium">② 达标条件（按复测结果判断；延迟 ≤ 见上面）</div>
+                        <div className="w-full font-medium">② 达标条件（逐级筛选：先延迟，再丢包，再下载，后一步只测前一步合格的）</div>
                         <label className="flex items-center gap-1">
                             <input type="checkbox" checked={c.dlOn} onChange={(e) => set({ dlOn: e.target.checked })} disabled={disabled} />
                             下载 ≥
@@ -173,7 +173,7 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
                                 <option value="median">中位数</option>
                             </select>
                         </label>
-                        <div className="w-full text-[11px] text-gray-500 dark:text-gray-400">勾选的项目会对所有候选 IP 复测并显示结果；上面设了达标条件的项目（延迟、下载、丢包）即使没勾选也会自动测。</div>
+                        <div className="w-full text-[11px] text-gray-500 dark:text-gray-400">测试顺序固定为 延迟 → 丢包 → 下载，每一步只在上一步合格的 IP 里继续测，不合格的直接淘汰，省时间。勾选的项目会复测并显示结果；设了达标条件的项目即使没勾选也会测。</div>
                     </div>
                     <div className="rounded-md border border-gray-200 dark:border-gray-600 p-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-700 dark:text-gray-200">
                         <div className="w-full font-medium">④ 结果</div>
@@ -187,6 +187,10 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
                                 <option value="download">下载速度（高→低）</option>
                                 <option value="loss">丢包率（低→高）</option>
                             </select>
+                        </label>
+                        <label className="flex items-center gap-1">
+                            <input type="checkbox" checked={c.showFullResult} onChange={(e) => set({ showFullResult: e.target.checked })} />
+                            显示完整优选结果（成功和失败的都显示，失败的标出原因）
                         </label>
                         <label className="flex items-center gap-1">
                             <input type="checkbox" checked={c.afterScan} onChange={(e) => set({ afterScan: e.target.checked })} />

@@ -138,6 +138,58 @@ function clearCachedTestDomain(domain?: string): void {
     }
 }
 
+// 体检后确定的可用测试域名（按优劣排序）；为空表示未体检或都不可用，此时使用全部候选
+let activeTestDomains: string[] | null = null;
+let domainCheckAt = 0;
+let lastDomainCheck: DomainCheckResult | null = null;
+
+export interface DomainCheckResult { usable: string[]; unusable: string[]; }
+
+/** 当前应使用的测试域名：优先体检结果，其次上次成功的域名，最后是全部候选 */
+function currentTestDomains(): string[] {
+    return activeTestDomains && activeTestDomains.length > 0 ? activeTestDomains : orderedTestDomains();
+}
+
+/**
+ * 测试域名体检：用几个已知可用的 Cloudflare IP 分别探测每个测试域名，
+ * 只保留能连通的域名（连得最快的排第一）。之后每个 IP 只走可用域名，
+ * 死 IP 不会再多试一个不可用的域名，白白多等一次超时。结果缓存 5 分钟。
+ */
+export async function ensureTestDomainsChecked(force = false): Promise<DomainCheckResult> {
+    if (!force && lastDomainCheck && Date.now() - domainCheckAt < 5 * 60 * 1000) return lastDomainCheck;
+    const samples = PROBE_FALLBACK_IPS.slice(0, 3);
+    const stats = await Promise.all(TEST_DOMAIN_CANDIDATES.map(async (domain) => {
+        let ok = 0;
+        let best = Infinity;
+        await Promise.all(samples.map(async (sampleIp) => {
+            const hex = ipToHex(sampleIp);
+            if (!hex) return;
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 4000);
+            const startedAt = performance.now();
+            try {
+                const response = await fetch(`https://${hex}.${domain}:443/ip.json?_t=${Date.now()}`, { signal: controller.signal, cache: 'no-store' });
+                if (response.ok) {
+                    ok++;
+                    best = Math.min(best, performance.now() - startedAt);
+                }
+            } catch { /* 该域名对这个 IP 不通 */ } finally {
+                clearTimeout(timer);
+            }
+        }));
+        return { domain, ok, best };
+    }));
+    const usableStats = stats.filter(s => s.ok > 0).sort((a, b) => b.ok - a.ok || a.best - b.best);
+    const usable = usableStats.map(s => s.domain);
+    const unusable = stats.filter(s => s.ok === 0).map(s => s.domain);
+    // 全部不通多半是网络/VPN 问题，不收窄域名，仍用全部候选，避免误伤
+    activeTestDomains = usable.length > 0 ? usable : null;
+    if (usable.length > 0) cacheTestDomain(usable[0]);
+    domainCheckAt = Date.now();
+    lastDomainCheck = { usable, unusable };
+    return lastDomainCheck;
+}
+
 function orderedTestDomains(): string[] {
     const cached = getCachedTestDomain();
     return cached
@@ -156,12 +208,12 @@ function orderedTestDomains(): string[] {
  */
 export async function testIpLatency(ip: string, port: number, timeout: number): Promise<Omit<ScanResult, 'isAvailable' | 'ip' | 'port'>> {
     const hexIp = ipToHex(ip);
-    const candidates = isIPv6(ip)
-        ? [null]
-        : TEST_DOMAIN_CANDIDATES.map(domain => hexIp ? `${hexIp}.${domain}` : `${ip}.${domain}`);
+    const candidates: Array<{ host: string | null; domain: string | null }> = isIPv6(ip)
+        ? [{ host: null, domain: null }]
+        : currentTestDomains().map(domain => ({ host: hexIp ? `${hexIp}.${domain}` : `${ip}.${domain}`, domain }));
     let lastError = 'Error';
 
-    for (const candidate of candidates) {
+    for (const cand of candidates) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), timeout);
         const headers: Record<string, string> = { 'User-Agent': 'Cloudflare-IP-Scanner/1.0' };
@@ -171,7 +223,7 @@ export async function testIpLatency(ip: string, port: number, timeout: number): 
             headers['Host'] = 'ns.psb.kdns.fr';
             testUrl = `https://[${ip}]:${port}/ip.json?_t=${Date.now()}`;
         } else {
-            testUrl = `https://${candidate}:${port}/ip.json?_t=${Date.now()}`;
+            testUrl = `https://${cand.host}:${port}/ip.json?_t=${Date.now()}`;
         }
 
         try {
@@ -193,6 +245,7 @@ export async function testIpLatency(ip: string, port: number, timeout: number): 
                 continue;
             }
             await second.arrayBuffer().catch(() => undefined);
+            if (cand.domain && cand.domain !== memoryTestDomain) cacheTestDomain(cand.domain);
             return { latency: Math.max(1, Math.round(performance.now() - secondRequestStart)), colo };
         } catch (error: any) {
             lastError = error?.name === 'AbortError' ? '超时' : '错误';
@@ -411,7 +464,7 @@ export async function testBrowserPacketLoss(
 
     const attempts = Math.max(5, Math.min(20, Math.floor(options.attempts ?? 10)));
     const timeoutMs = Math.max(1500, Math.min(8000, options.timeoutMs ?? 3000));
-    const template = (options.urlTemplate || 'https://{hexip}.ns.psb.kdns.fr:{port}/ip.json').trim();
+    const template = (options.urlTemplate || `https://{hexip}.${currentTestDomains()[0]}:{port}/ip.json`).trim();
     const urlBase = template.replace(/\{ip\}/g, ip).replace(/\{hexip\}/g, hexIp).replace(/\{port\}/g, String(port));
     let parsedUrl: URL;
     try { parsedUrl = new URL(urlBase); } catch {

@@ -24,8 +24,7 @@ import {
     type CidrBlock,
     cidrHostCount,
     resolveDomainToIp,
-    probeBrowserAvailable,
-} from '../utils/scanner';
+    probeBrowserAvailable, ensureTestDomainsChecked } from '../utils/scanner';
 import {
     probeLocalAgent, startAgentScan, fetchAgentProgress, stopAgentScan,
     DEFAULT_AGENT_PORT,
@@ -565,6 +564,16 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
                     onScanComplete(finalResults);
                 }
             };
+
+            // 浏览器端扫描前先体检测试域名：只用连得通的，避免死 IP 白白多试一个不可用的域名
+            if (!(activeTab === 'local' && agentProbe?.online === true)) {
+                const chk = await ensureTestDomainsChecked();
+                if (chk.usable.length === 0) {
+                    showToast('测试域名都连不通（可能是网络或 VPN 问题），仍会尝试扫描', 'warning');
+                } else if (chk.unusable.length > 0) {
+                    showToast(`测试域名 ${chk.unusable.join('、')} 不可用，已只用 ${chk.usable.join('、')}`, 'info');
+                }
+            }
 
             // 分层筛选：阶段 1 每个 /24 抽样粗筛，阶段 2 只精测最优的若干 /24
             stopRequestedRef.current = false;

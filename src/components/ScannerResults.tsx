@@ -53,6 +53,9 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
     const [avgMetrics, setAvgMetrics] = useState({ latency: true, download: true, loss: true });
     // 自动优选配置
     const [autoRunning, setAutoRunning] = useState(false);
+    const [autoStageText, setAutoStageText] = useState('');
+    // 优选视图：候选 / 达标 / 勾选 的 IP，以及每个被淘汰 IP 的原因
+    const [pipelineView, setPipelineView] = useState<null | { candidates: Set<string>; passed: Set<string>; selected: Set<string>; reasons: Record<string, string> }>(null);
     const [pipe, setPipe] = usePipelineConfig(); // 流水线统一配置（与“扫描配置”共用）
     const autoEnabled = pipe.enabled;
     const autoAfterScan = pipe.afterScan;
@@ -250,6 +253,11 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
     });
 
     let limitedResults = [...packetLossFilteredResults];
+    // 优选视图：默认只显示达标的；开启“显示完整优选结果”时，成功和失败的候选都显示
+    if (pipelineView) {
+        const visible = pipe.showFullResult ? pipelineView.candidates : pipelineView.passed;
+        limitedResults = limitedResults.filter(r => visible.has(speedKey(r)));
+    }
     if (regionLimitActive) {
         const regionCountsForLimit: { [key: string]: number } = {};
         limitedResults = packetLossFilteredResults.filter(r => {
@@ -407,6 +415,20 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
 
     const abortPacketLoss = () => packetLossAbortRef.current?.abort();
 
+    // 优选结果标签：达标并已勾选 / 达标未勾选 / 被淘汰及原因
+    const renderPipelineTag = (key: string) => {
+        if (!pipelineView) return null;
+        const why = pipelineView.reasons[key];
+        if (why) {
+            const passedOnly = why.startsWith('达标');
+            return <span className={`ml-2 inline-block rounded px-1.5 py-0.5 text-[10px] font-normal ${passedOnly ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'}`}>{why}</span>;
+        }
+        if (pipelineView.selected.has(key)) {
+            return <span className="ml-2 inline-block rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-normal text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">达标已选</span>;
+        }
+        return null;
+    };
+
     type Measured = { lat?: number; dl?: number; loss?: number };
     type MeasureMetrics = { latency: boolean; download: boolean; loss: boolean };
     const num = (v: string, def: number, min: number, max: number) => {
@@ -522,7 +544,9 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
     };
     const abortAvgTest = () => avgAbortRef.current?.abort();
 
-    // 自动优选：初筛候选 → 多轮平均测试 → 按条件筛选 → 排序 → 勾选前 N 个
+    // 自动优选：逐级筛选，每一步只在上一步合格的 IP 里继续测，减少无谓测试
+    //   阶段 1 测延迟，留下达标的 → 阶段 2 测丢包率，筛掉不合格的 → 阶段 3 测下载速度，筛掉不合格的
+    //   最后按排序依据排序、套用每地区上限和保留个数，自动勾选
     // mode: full=从全部扫描结果开始；selected=对已勾选的重新测试并筛选；refilter=按已有测速数据重新筛选（不测试）
     const runAutoPipeline = async (mode: 'full' | 'selected' | 'refilter' = 'full') => {
         if (isAvgTesting || isBrowserSpeedTesting || isPacketLossTesting || autoRunning) return;
@@ -540,6 +564,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         const dlMins = regionDlMins(regionRules);
         // 下载速度下限：地区单独设置优先，其次是全局“下载 ≥”
         const dlThresholdOf = (c: ScanResult): number | undefined => dlMins[(c.colo || '').toUpperCase()] ?? (autoDlOn ? dlMin : undefined);
+        const needLoss = autoLossOn || pipe.retestLoss || sortKey === 'loss';
         const needDl = autoDlOn || Object.keys(dlMins).length > 0 || sortKey === 'download' || pipe.retestDownload;
 
         let candidates: ScanResult[];
@@ -564,6 +589,8 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         }
 
         const data: Record<string, Measured> = {};
+        const reasons: Record<string, string> = {};
+        const drop = (c: ScanResult, why: string) => { reasons[speedKey(c)] = why; };
         setAutoRunning(true);
         try {
             if (mode === 'refilter') {
@@ -578,50 +605,66 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                         loss: pl && !pl.error ? pl.packetLoss : undefined,
                     };
                 }
-            } else {
-                if (mode === 'full') setSelectedSpeedTargets(new Set(candidates.map(speedKey)));
-                // 阶段 A：延迟（和丢包）。设置了“下载只测延迟前 N 个”时，下载放到阶段 B
-                const splitDl = needDl && dlTopN > 0;
-                let metricsA: MeasureMetrics = {
-                    latency: autoLatencyOn || sortKey === 'latency' || splitDl || pipe.retestLatency,
-                    download: needDl && !splitDl,
-                    loss: autoLossOn || sortKey === 'loss' || pipe.retestLoss,
-                };
-                if (!metricsA.latency && !metricsA.download && !metricsA.loss) metricsA = { ...metricsA, latency: true };
-                const resA = await runMeasure(candidates, metricsA, rounds);
-                if (resA.aborted) {
-                    showToast('自动优选已中断', 'warning');
-                    return;
+            } else if (mode === 'full') {
+                setSelectedSpeedTargets(new Set(candidates.map(speedKey)));
+            }
+            const interrupted = () => showToast('自动优选已中断', 'warning');
+
+            // 阶段 1：延迟，留下达标的
+            if (mode !== 'refilter') {
+                setAutoStageText(`阶段 1/3 测延迟（${candidates.length} 个）`);
+                const r1 = await runMeasure(candidates, { latency: true, download: false, loss: false }, rounds);
+                if (r1.aborted) { interrupted(); return; }
+                Object.assign(data, r1.data);
+            }
+            let alive = candidates.filter(c => {
+                const m = data[speedKey(c)];
+                if (!m || m.lat === undefined) { drop(c, '延迟测试失败'); return false; }
+                if (autoLatencyOn && m.lat > latMax) { drop(c, `延迟 ${m.lat}ms 超过 ${latMax}ms`); return false; }
+                return true;
+            });
+
+            // 阶段 2：丢包率，只测延迟合格的，筛掉不合格的
+            if (needLoss && alive.length > 0) {
+                if (mode !== 'refilter') {
+                    setAutoStageText(`阶段 2/3 测丢包（${alive.length} 个）`);
+                    const r2 = await runMeasure(alive, { latency: false, download: false, loss: true }, rounds);
+                    if (r2.aborted) { interrupted(); return; }
+                    for (const [k, m] of Object.entries(r2.data)) data[k] = { ...(data[k] || {}), ...m };
                 }
-                Object.assign(data, resA.data);
-                if (splitDl) {
-                    const ranked = candidates
-                        .filter(c => {
-                            const m = data[speedKey(c)];
-                            return !!m && !(autoLatencyOn && !(m.lat !== undefined && m.lat <= latMax));
-                        })
-                        .sort((a, b) => (data[speedKey(a)]?.lat ?? a.latency) - (data[speedKey(b)]?.lat ?? b.latency))
-                        .slice(0, dlTopN);
-                    if (ranked.length > 0) {
-                        const resB = await runMeasure(ranked, { latency: false, download: true, loss: false }, rounds);
-                        if (resB.aborted) {
-                            showToast('自动优选已中断', 'warning');
-                            return;
-                        }
-                        for (const [k, m] of Object.entries(resB.data)) data[k] = { ...(data[k] || {}), ...m };
-                    }
+                if (autoLossOn) {
+                    alive = alive.filter(c => {
+                        const m = data[speedKey(c)];
+                        if (!m || m.loss === undefined) { drop(c, '丢包测试失败'); return false; }
+                        if (m.loss > lossMax) { drop(c, `丢包 ${m.loss}% 超过 ${lossMax}%`); return false; }
+                        return true;
+                    });
                 }
             }
 
-            const passed = candidates.filter(c => {
-                const m = data[speedKey(c)];
-                if (!m) return false;
-                if (autoLatencyOn && !(m.lat !== undefined && m.lat <= latMax)) return false;
-                const th = dlThresholdOf(c);
-                if (th !== undefined && !(m.dl !== undefined && m.dl >= th)) return false;
-                if (autoLossOn && !(m.loss !== undefined && m.loss <= lossMax)) return false;
-                return true;
-            });
+            // 阶段 3：下载速度，只测前两步都合格的；设了“下载只测延迟前 N 个”时再按延迟取前 N
+            if (needDl && alive.length > 0) {
+                const byLat = [...alive].sort((a, b) => (data[speedKey(a)]?.lat ?? a.latency) - (data[speedKey(b)]?.lat ?? b.latency));
+                const dlTargets = dlTopN > 0 ? byLat.slice(0, dlTopN) : byLat;
+                if (mode !== 'refilter') {
+                    setAutoStageText(`阶段 3/3 测下载（${dlTargets.length} 个）`);
+                    const r3 = await runMeasure(dlTargets, { latency: false, download: true, loss: false }, rounds);
+                    if (r3.aborted) { interrupted(); return; }
+                    for (const [k, m] of Object.entries(r3.data)) data[k] = { ...(data[k] || {}), ...m };
+                }
+                const tested = mode === 'refilter' ? null : new Set(dlTargets.map(speedKey));
+                alive = alive.filter(c => {
+                    const th = dlThresholdOf(c);
+                    if (th === undefined) return true;
+                    if (tested && !tested.has(speedKey(c))) { drop(c, `未进入下载测试（延迟排名超出前 ${dlTopN} 个）`); return false; }
+                    const m = data[speedKey(c)];
+                    if (!m || m.dl === undefined) { drop(c, '下载测试失败'); return false; }
+                    if (m.dl < th) { drop(c, `下载 ${m.dl}Mbps 低于 ${th}Mbps`); return false; }
+                    return true;
+                });
+            }
+
+            const passed = alive;
             const rankKey = sortKey === 'default' ? 'latency' : sortKey;
             const latOf = (c: ScanResult) => data[speedKey(c)]?.lat ?? c.latency;
             passed.sort((a, b) => {
@@ -632,20 +675,33 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                 return latOf(a) - latOf(b);
             });
             const finalList = capByRegion(passed, perRegion, limits).slice(0, keepN);
-            setSelectedSpeedTargets(new Set(finalList.map(speedKey)));
+            const finalKeys = new Set(finalList.map(speedKey));
+            passed.forEach(c => { if (!finalKeys.has(speedKey(c))) reasons[speedKey(c)] = '达标，但超出保留个数/地区上限，未勾选'; });
+            setSelectedSpeedTargets(finalKeys);
+            setPipelineView({
+                candidates: new Set(candidates.map(speedKey)),
+                passed: new Set(passed.map(speedKey)),
+                selected: finalKeys,
+                reasons,
+            });
             if (sortKey === 'default') setSortKey('latency');
             const label = mode === 'refilter' ? '重新筛选完成' : mode === 'selected' ? '再优选完成' : '自动优选完成';
+            const who = mode === 'full' ? '候选' : '参与';
             showToast(
                 finalList.length > 0
-                    ? `${label}：${mode === 'full' ? '候选' : '参与'} ${candidates.length} 个，达标 ${passed.length} 个，已勾选前 ${finalList.length} 个`
-                    : `${label}：${mode === 'full' ? '候选' : '参与'} ${candidates.length} 个，但没有 IP 满足全部达标条件，可放宽条件后重试`,
+                    ? `${label}：${who} ${candidates.length} 个，达标 ${passed.length} 个，已勾选前 ${finalList.length} 个`
+                    : `${label}：${who} ${candidates.length} 个，但没有 IP 满足全部达标条件，可放宽条件后重试`,
                 finalList.length > 0 ? 'success' : 'warning',
             );
         } finally {
             setAutoRunning(false);
+            setAutoStageText('');
         }
     };
 
+
+    // 有新的扫描结果时，清掉上一次的优选视图
+    useEffect(() => { setPipelineView(null); }, [scanResults]);
 
     // 扫描完成（结果更新）后自动执行优选
     useEffect(() => {
@@ -832,6 +888,17 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                                         </>
                                     ) : (
                                         <span className="text-gray-500 dark:text-gray-400">流水线未启用（可在“扫描配置”里打开）</span>
+                                    )}
+                                    {autoStageText && <span className="text-indigo-600 dark:text-indigo-300">{autoStageText}</span>}
+                                    <label className="flex items-center gap-1">
+                                        <input type="checkbox" checked={pipe.showFullResult} onChange={(e) => setPipe({ showFullResult: e.target.checked })} />
+                                        显示完整优选结果（成功和失败的都显示）
+                                    </label>
+                                    {pipelineView && (
+                                        <span className="text-gray-500 dark:text-gray-400">
+                                            优选视图：达标 {pipelineView.passed.size} / 候选 {pipelineView.candidates.size}，当前显示{pipe.showFullResult ? '全部候选' : '仅达标'}
+                                            <button type="button" onClick={() => setPipelineView(null)} className="ml-2 underline">显示全部扫描结果</button>
+                                        </span>
                                     )}
                                     <label className="flex items-center gap-1">排序
                                         <select value={sortKey} onChange={(e) => setSortKey(e.target.value as PipelineSortKey)} disabled={autoRunning} className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-0.5">
@@ -1097,7 +1164,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                                             <td className="px-3 py-4 whitespace-nowrap text-sm font-mono text-gray-900 dark:text-white">
                                                 <div className="flex items-center gap-2">
                                                     <input type="checkbox" checked={selectedSpeedTargets.has(`${ip}:${port}`)} onChange={() => toggleSpeedTarget(`${ip}:${port}`)} disabled={domain || isBrowserSpeedTesting || isSaving} title="选择此 IP 用于下载测速、丢包测试及保存到 KV" className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
-                                                    <span>{ip}</span>
+                                                    <span>{ip}</span>{renderPipelineTag(`${ip}:${port}`)}
                                                 {domain && <span className="ml-2 px-1.5 py-0.5 text-[10px] rounded bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">域名</span>}
                                                 </div>
                                             </td>

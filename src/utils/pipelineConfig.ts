@@ -24,6 +24,7 @@ export interface PipelineConfig {
     keep: string;           // 最终保留个数
     rounds: string;         // 多轮平均测试轮数
     sortKey: PipelineSortKey;
+    showFullResult: boolean;      // 显示完整优选结果：成功和失败的都显示
     retestLatency: boolean;       // 复测项目：延迟
     retestDownload: boolean;      // 复测项目：下载速度
     retestLoss: boolean;          // 复测项目：丢包率
@@ -50,6 +51,7 @@ const DEFAULTS: PipelineConfig = {
     keep: '20',
     rounds: '3',
     sortKey: 'default',
+    showFullResult: false,
     retestLatency: true,
     retestDownload: false,
     retestLoss: false,
