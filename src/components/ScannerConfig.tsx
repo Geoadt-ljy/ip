@@ -558,7 +558,7 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
                 const cfg = getPipelineConfig();
                 if (cfg.enabled) {
                     const filtered = applyScanFilter(finalResults, cfg);
-                    if (filtered.removed > 0) showToast(`流水线已按地区/每地区上限筛选，去掉 ${filtered.removed} 条`, 'info');
+                    if (filtered.removed > 0) showToast(`流水线已按地区白名单筛选，去掉 ${filtered.removed} 条`, 'info');
                     onScanComplete(filtered.results);
                 } else {
                     onScanComplete(finalResults);

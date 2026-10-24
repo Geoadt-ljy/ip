@@ -450,7 +450,7 @@ export async function testBrowserDownloadSpeed(
 export async function testBrowserPacketLoss(
     ip: string,
     port: number,
-    options: { attempts?: number; timeoutMs?: number; urlTemplate?: string; signal?: AbortSignal } = {},
+    options: { attempts?: number; timeoutMs?: number; urlTemplate?: string; signal?: AbortSignal; countSpikes?: boolean } = {},
 ): Promise<{ packetLoss: number; sent: number; received: number; error?: string; aborted?: boolean; spikes?: number; jitterMs?: number }> {
     if (isIPv6(ip) || isDomainName(ip)) {
         return { packetLoss: 100, sent: 0, received: 0, error: '浏览器丢包测试目前仅支持 IPv4 IP' };
@@ -525,7 +525,8 @@ export async function testBrowserPacketLoss(
         for (let i = 1; i < rtts.length; i++) diff += Math.abs(rtts[i] - rtts[i - 1]);
         jitterMs = Math.round(diff / (rtts.length - 1));
     }
-    const received = Math.max(0, rtts.length - spikes);
+    // countSpikes=false（默认宽松）：只把请求失败/超时算丢包；true（严格）：延迟尖峰也算
+    const received = Math.max(0, rtts.length - (options.countSpikes === false ? 0 : spikes));
     return {
         packetLoss: Number((((attempts - received) / attempts) * 100).toFixed(1)),
         sent: attempts,

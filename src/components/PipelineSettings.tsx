@@ -99,8 +99,8 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
                         <label className="flex items-center gap-1">地区
                             <input type="text" value={c.regions} onChange={(e) => set({ regions: e.target.value })} disabled={disabled} placeholder="如 HKG:5@20,SJC:3,NRT，留空=不限" className={`w-44 ${numCls}`} />
                         </label>
-                        <label className="flex items-center gap-1">每个地区最多
-                            <input type="number" min={0} max={1000} value={c.perRegion} onChange={(e) => set({ perRegion: e.target.value })} disabled={disabled} className={`w-14 ${numCls}`} /> 个（0=不限）
+                        <label className="flex items-center gap-1">最终每个地区最多保留
+                            <input type="number" min={0} max={100000} value={c.perRegion} onChange={(e) => set({ perRegion: e.target.value })} disabled={disabled} className={`w-14 ${numCls}`} /> 个（0=不限）
                         </label>
                         <label className="flex items-center gap-1">候选数量
                             <input type="number" min={0} max={100000} value={c.candidates} onChange={(e) => set({ candidates: e.target.value })} disabled={disabled} className={`w-20 ${numCls}`} title="0=不限：对所有符合延迟条件的 IP 都进入复测，数量多时会比较久" /> 个（0=不限）
@@ -154,6 +154,10 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
                             丢包 ≤
                             <input type="number" min={0} max={100} value={c.lossMax} onChange={(e) => set({ lossMax: e.target.value })} disabled={disabled || !c.lossOn} className={`w-14 ${numCls}`} /> %
                         </label>
+                        <label className="flex items-center gap-1" title="不勾选＝只把请求失败/超时算丢包（宽松）；勾选＝被拖慢的明显延迟尖峰（疑似重传）也算丢包（严格，丢包条件设成 0 时几乎没有 IP 能通过）">
+                            <input type="checkbox" checked={c.lossStrict} onChange={(e) => set({ lossStrict: e.target.checked })} disabled={disabled} />
+                            严格判定（延迟尖峰也算丢包）
+                        </label>
                     </div>
                     <div className="rounded-md border border-gray-200 dark:border-gray-600 p-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-700 dark:text-gray-200">
                         <div className="w-full font-medium">③ 复测设置（对候选 IP 逐项复测，延迟、下载、丢包通用）</div>
@@ -161,6 +165,9 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
                         <label className="flex items-center gap-1"><input type="checkbox" checked={c.retestLatency} onChange={(e) => set({ retestLatency: e.target.checked })} disabled={disabled} />延迟</label>
                         <label className="flex items-center gap-1"><input type="checkbox" checked={c.retestDownload} onChange={(e) => set({ retestDownload: e.target.checked })} disabled={disabled} />下载速度</label>
                         <label className="flex items-center gap-1"><input type="checkbox" checked={c.retestLoss} onChange={(e) => set({ retestLoss: e.target.checked })} disabled={disabled} />丢包率</label>
+                        <label className="flex items-center gap-1">延迟复测容差 +
+                            <input type="number" min={0} max={300} value={c.latencyTolerance} onChange={(e) => set({ latencyTolerance: e.target.value })} disabled={disabled} className={`w-14 ${numCls}`} title="复测延迟时允许超出延迟上限的比例，避免并发和抖动把扫描时合格的 IP 误淘汰" /> %
+                        </label>
                         <label className="flex items-center gap-1">测试轮数
                             <input type="number" min={1} max={10} value={c.rounds} onChange={(e) => set({ rounds: e.target.value })} disabled={disabled} className={`w-14 ${numCls}`} />
                         </label>
@@ -173,12 +180,12 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
                                 <option value="median">中位数</option>
                             </select>
                         </label>
-                        <div className="w-full text-[11px] text-gray-500 dark:text-gray-400">测试顺序固定为 延迟 → 丢包 → 下载，每一步只在上一步合格的 IP 里继续测，不合格的直接淘汰，省时间。勾选的项目会复测并显示结果；设了达标条件的项目即使没勾选也会测。</div>
+                        <div className="w-full text-[11px] text-gray-500 dark:text-gray-400">测试顺序固定为 延迟 → 丢包 → 下载，每一步只在上一步合格的 IP 里继续测，不合格的直接淘汰，省时间。勾选的项目会复测并显示结果；设了丢包、下载达标条件的项目即使没勾选也会测。延迟默认不用复测：扫描阶段已按延迟上限筛过，直接沿用，勾选“延迟”才会重新测，并按“延迟复测容差”放宽判定。</div>
                     </div>
                     <div className="rounded-md border border-gray-200 dark:border-gray-600 p-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-700 dark:text-gray-200">
                         <div className="w-full font-medium">④ 结果</div>
                         <label className="flex items-center gap-1">最终保留
-                            <input type="number" min={1} max={500} value={c.keep} onChange={(e) => set({ keep: e.target.value })} disabled={disabled} className={`w-16 ${numCls}`} /> 个
+                            <input type="number" min={0} max={100000} value={c.keep} onChange={(e) => set({ keep: e.target.value })} disabled={disabled} className={`w-20 ${numCls}`} title="0=不限" /> 个（0=不限）
                         </label>
                         <label className="flex items-center gap-1">排序依据
                             <select value={c.sortKey} onChange={(e) => set({ sortKey: e.target.value as PipelineSortKey })} disabled={disabled} className={numCls}>
@@ -194,7 +201,7 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
                         </label>
                     </div>
                     <div className="text-[11px] text-gray-500 dark:text-gray-400">
-                        扫描阶段直接使用：延迟上限（覆盖上方“延迟上限”）、地区白名单、每个地区上限（没有地区信息的结果会保留）。优选阶段再按候选数量、下载、丢包、保留个数和排序处理。
+                        扫描阶段直接使用：延迟上限（覆盖上方“延迟上限”）和地区白名单（没有地区信息的结果会保留）。“最终每个地区最多保留”和“最终保留”只在测完之后的最终结果里生效，不会减少参与测试的 IP 数量。
                     </div>
                 </>
             )}

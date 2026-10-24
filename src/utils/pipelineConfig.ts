@@ -24,6 +24,8 @@ export interface PipelineConfig {
     keep: string;           // 最终保留个数
     rounds: string;         // 多轮平均测试轮数
     sortKey: PipelineSortKey;
+    latencyTolerance: string;     // 延迟复测容差（%）：复测延迟允许超出上限的比例
+    lossStrict: boolean;          // 丢包判定：false=只算请求失败；true=延迟尖峰（疑似重传）也算
     showFullResult: boolean;      // 显示完整优选结果：成功和失败的都显示
     retestLatency: boolean;       // 复测项目：延迟
     retestDownload: boolean;      // 复测项目：下载速度
@@ -51,8 +53,10 @@ const DEFAULTS: PipelineConfig = {
     keep: '20',
     rounds: '3',
     sortKey: 'default',
+    latencyTolerance: '30',
+    lossStrict: true,
     showFullResult: false,
-    retestLatency: true,
+    retestLatency: false,
     retestDownload: false,
     retestLoss: false,
     retestConcurrency: '3',
@@ -252,7 +256,8 @@ export function capByRegion<T extends { colo?: string }>(list: T[], k: number, l
 }
 
 /**
- * 扫描完成后按流水线配置筛选：地区白名单 + 每个地区上限（可按地区单独设置）。
+ * 扫描完成后按流水线配置筛选：只按地区白名单筛选。
+ * 注意：“每个地区最多保留”只在最终结果里生效，这里不做数量限制，保证所有合格 IP 都能进入后续测试。
  * 没有地区信息（colo 为空）的结果无法判断归属，予以保留。
  */
 export function applyScanFilter(results: ScanResult[], cfg: PipelineConfig): { results: ScanResult[]; removed: number } {
@@ -261,14 +266,6 @@ export function applyScanFilter(results: ScanResult[], cfg: PipelineConfig): { r
     if (rules.length > 0) {
         const codes = rules.map(r => r.code);
         out = out.filter(r => !r.colo || codes.includes(r.colo.toUpperCase()));
-    }
-    const k = Math.floor(Number(cfg.perRegion)) || 0;
-    const limits = regionLimits(rules);
-    if (k > 0 || Object.keys(limits).length > 0) {
-        const good = (r: ScanResult) => r.isAvailable !== false && r.latency > 0;
-        const ok = out.filter(good).sort((a, b) => a.latency - b.latency);
-        const rest = out.filter(r => !good(r));
-        out = [...capByRegion(ok, k, limits), ...rest];
     }
     return { results: out, removed: results.length - out.length };
 }
