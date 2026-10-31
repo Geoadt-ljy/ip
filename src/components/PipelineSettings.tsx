@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { usePipelineConfig, usePipelinePresets, savePipelinePreset, loadPipelinePreset, deletePipelinePreset, syncPipelinePresetsFromCloud, resetPipelineConfig, parseRegionRules, stringifyRegionRules, type PipelineSortKey } from '../utils/pipelineConfig';
+import { usePipelineConfig, usePipelineMode, importPipelineConfigFrom, copyPipelineConfigToAll, PIPELINE_MODES, PIPELINE_MODE_LABELS, type PipelineMode, usePipelinePresets, savePipelinePreset, loadPipelinePreset, deletePipelinePreset, syncPipelinePresetsFromCloud, resetPipelineConfig, parseRegionRules, stringifyRegionRules, type PipelineSortKey } from '../utils/pipelineConfig';
 import { useToast } from './Toast';
 import { coloMap, getColoText } from '../utils/colo';
 
@@ -12,6 +12,19 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
     const presets = usePipelinePresets();
     const [presetName, setPresetName] = useState('');
     const [presetSel, setPresetSel] = useState('');
+    const mode = usePipelineMode();
+    const [importSel, setImportSel] = useState('');
+    const handleImportMode = () => {
+        if (!importSel) { showToast('请先选择要导入哪个模式的流水线配置', 'warning'); return; }
+        const from = importSel as PipelineMode;
+        importPipelineConfigFrom(from);
+        showToast(`已把“${PIPELINE_MODE_LABELS[from]}”的流水线配置导入到“${PIPELINE_MODE_LABELS[mode]}”`, 'success');
+        setImportSel('');
+    };
+    const handleCopyAll = () => {
+        copyPipelineConfigToAll();
+        showToast(`已把“${PIPELINE_MODE_LABELS[mode]}”的流水线配置复制到其他所有模式`, 'success');
+    };
     const [showTable, setShowTable] = useState(false);
     const [cloudStatus, setCloudStatus] = useState<'checking' | 'ok' | 'local'>('checking');
     // 进入页面时从云端 KV 拉取已保存的配置（云端为空而本地已有时自动迁移上去）
@@ -71,6 +84,15 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
                 <input type="checkbox" checked={c.enabled} onChange={(e) => set({ enabled: e.target.checked })} disabled={disabled} />
                 启用流水线（测延迟 → 测丢包 → 测下载，逐级筛选 → 排序勾选）
             </label>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-gray-700 dark:text-gray-200">
+                <span>当前模式：<b>{PIPELINE_MODE_LABELS[mode]}</b>（官方 IP、CM IP、IP 源、自定义 IP 各有一份流水线配置）</span>
+                <select value={importSel} onChange={(e) => setImportSel(e.target.value)} disabled={disabled} className={numCls}>
+                    <option value="">从其他模式导入…</option>
+                    {PIPELINE_MODES.filter(m => m !== mode).map(m => <option key={m} value={m}>{PIPELINE_MODE_LABELS[m]}</option>)}
+                </select>
+                <button type="button" onClick={handleImportMode} disabled={disabled || !importSel} className="px-2 py-1 rounded-full bg-blue-100 text-blue-700 hover:bg-blue-200 disabled:opacity-50 dark:bg-blue-900/40 dark:text-blue-300">导入</button>
+                <button type="button" onClick={handleCopyAll} disabled={disabled} className="px-2 py-1 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-200" title="把当前模式的配置复制到其他所有模式（各模式的总开关保持不变）">复制到所有模式</button>
+            </div>
             {!c.enabled && (
                 <div className="text-[11px] text-gray-500 dark:text-gray-400">未启用时按上方常规设置扫描，结果列表里的"自动优选"也不可用。</div>
             )}

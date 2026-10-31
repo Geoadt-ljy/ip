@@ -35,7 +35,7 @@ import { Gauge, Play, StopCircle, Loader2, Pause, Square, Cpu, RefreshCw, AlertT
 import { parseIpFileText, MAX_IMPORT_TARGETS } from '../utils/ipFile';
 import { useConfirm } from './ConfirmDialog';
 import { PipelineSettings } from './PipelineSettings';
-import { usePipelineConfig, getPipelineConfig, applyScanFilter } from '../utils/pipelineConfig';
+import { usePipelineConfig, getPipelineConfig, applyScanFilter, setPipelineMode } from '../utils/pipelineConfig';
 
 interface IpScannerConfigAndControlProps {
     cfIps: CloudflareIps | null;
@@ -54,6 +54,7 @@ export function ScannerConfig({ cfIps, onScanComplete }: IpScannerConfigAndContr
     const [selectedPort, setSelectedPort] = useState(443);
     const [ipSource, setIpSource] = useState<'cf' | 'cm' | 'third' | 'custom'>('cf');
     const [customIps, setCustomIps] = useState('');
+    useEffect(() => { setPipelineMode(ipSource); }, [ipSource]); // 流水线配置跟随当前选中的 IP 来源
     const [pipe] = usePipelineConfig(); // 流水线统一配置（总开关开启时接管延迟上限）
     const pipeLatency = pipe.enabled && pipe.latencyOn ? Math.floor(Number(pipe.latencyMax)) : 0;
     const latencyOverride = Number.isFinite(pipeLatency) && pipeLatency > 0 ? pipeLatency : 0;

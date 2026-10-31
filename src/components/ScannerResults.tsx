@@ -80,6 +80,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
     };
     const setSortKey = (k: PipelineSortKey) => setPipe({ sortKey: k });
     const autoRanRef = useRef<ScanResult[] | null>(null);
+    const pendingAutoRef = useRef<ScanResult[] | null>(null);
     // 导出配置
     const [exportScope, setExportScope] = useState<'selected' | 'all'>('selected');
     const [exportFormat, setExportFormat] = useState<'ipport' | 'ip' | 'csv'>('ipport');
@@ -253,17 +254,20 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         return !!result && !result.error && result.packetLoss <= effectivePacketLossValue;
     });
 
+    // 优选视图：先应用页面上的普通筛选（延迟/下载/丢包/地区/端口等），再只保留优选视图里的 IP；
+    // 默认只显示达标的，点“显示所有结果”后成功、失败和没进入测试的都显示并标出原因
     let limitedResults = [...packetLossFilteredResults];
+    let hiddenByFilters = 0;
     if (pipelineView) {
-        // 优选视图：直接按优选结果显示，不再受页面上的延迟/下载/丢包/地区/端口筛选影响，避免被筛选条件悄悄藏掉。
-        // 默认只显示达标的；点“显示所有结果”后，成功、失败和没进入测试的 IP 都显示并标出原因
         const visible = pipe.showFullResult
             ? new Set([...pipelineView.candidates, ...pipelineView.others])
             : pipelineView.passed;
-        limitedResults = scanResults.filter(r => !r.domain && visible.has(speedKey(r)));
-    } else if (regionLimitActive) {
+        limitedResults = limitedResults.filter(r => visible.has(speedKey(r)));
+        hiddenByFilters = scanResults.filter(r => !r.domain && visible.has(speedKey(r))).length - limitedResults.filter(r => !r.domain).length;
+    }
+    if (regionLimitActive) {
         const regionCountsForLimit: { [key: string]: number } = {};
-        limitedResults = packetLossFilteredResults.filter(r => {
+        limitedResults = limitedResults.filter(r => {
             const colo = r.colo || 'Unknown';
             regionCountsForLimit[colo] = (regionCountsForLimit[colo] || 0) + 1;
             return regionCountsForLimit[colo] <= effectiveIpsPerRegion;
@@ -449,6 +453,12 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         // 复测设置：同时测几个 IP（并发数）和统计方式（平均值/中位数），多轮平均测试与自动优选共用
         const concurrency = Math.floor(num(pipe.retestConcurrency, 3, 1, 10));
         const useMedian = pipe.retestStat === 'median';
+        // 测试期间保持屏幕常亮：手机息屏或切后台后，浏览器会限制定时器和网络请求，容易出现漏测
+        type WakeLockLike = { release: () => Promise<void> };
+        let wakeLock: WakeLockLike | null = null;
+        try {
+            wakeLock = (await (navigator as Navigator & { wakeLock?: { request: (type: 'screen') => Promise<WakeLockLike> } }).wakeLock?.request('screen')) ?? null;
+        } catch { /* 不支持或被拒绝时忽略 */ }
         setIsAvgTesting(true);
         setAvgDone(0);
         setAvgTotal(targets.length);
@@ -472,6 +482,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                     let received = 0;
                     let interrupted = false;
                     for (let i = 0; i < rounds && !signal.aborted; i++) {
+                        try {
                         if (metrics.latency) {
                             const r = await testIpLatency(target.ip, target.port, opts?.latencyTimeout ?? 3000);
                             if (r.latency > 0) lats.push(r.latency);
@@ -492,6 +503,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                             if (r.aborted) { interrupted = true; break; }
                             if (!r.error) { sent += r.sent; received += r.received; }
                         }
+                        } catch { /* 这一轮出错按失败处理，继续下一轮，不影响其余 IP */ }
                     }
                     // 被中断的目标数据不完整，不记录
                     if (interrupted || signal.aborted) return;
@@ -525,6 +537,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
             setIsAvgTesting(false);
             setSpeedPending({});
             if (avgAbortRef.current === controller) avgAbortRef.current = null;
+            wakeLock?.release().catch(() => undefined);
         }
         return { data, aborted: signal.aborted };
     };
@@ -751,10 +764,19 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
     useEffect(() => {
         if (!autoEnabled || !autoAfterScan || scanResults.length === 0) return;
         if (autoRanRef.current === scanResults) return;
+        // 有测试正在进行时不能直接跳过：先记下，等它结束后（busy 变化会重新进入这里）再自动优选，避免整批 IP 没被复测
+        if (isAvgTesting || isBrowserSpeedTesting || isPacketLossTesting || autoRunning) {
+            if (pendingAutoRef.current !== scanResults) {
+                pendingAutoRef.current = scanResults;
+                showToast('有测试正在进行，等它结束后会自动开始优选', 'info');
+            }
+            return;
+        }
         autoRanRef.current = scanResults;
+        pendingAutoRef.current = null;
         void runAutoPipeline();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [scanResults, autoEnabled, autoAfterScan]);
+    }, [scanResults, autoEnabled, autoAfterScan, isAvgTesting, isBrowserSpeedTesting, isPacketLossTesting, autoRunning]);
 
     // 导出：复制到剪贴板 / 下载文件
     const buildExportText = (): { text: string; count: number; ext: string } => {
@@ -943,7 +965,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                                     >{pipe.showFullResult ? '✓ 显示所有结果（含失败）' : '显示所有结果（含失败）'}</button>
                                     {pipelineView && (
                                         <span className="text-gray-500 dark:text-gray-400">
-                                            优选结果：达标 {pipelineView.passed.size} / 参与测试 {pipelineView.candidates.size}{pipelineView.others.size > 0 ? `（另有 ${pipelineView.others.size} 个没进入测试）` : ''}，当前{pipe.showFullResult ? '显示全部（含失败和没测的）' : '只显示达标'}
+                                            优选结果：达标 {pipelineView.passed.size} / 参与测试 {pipelineView.candidates.size}{pipelineView.others.size > 0 ? `（另有 ${pipelineView.others.size} 个没进入测试）` : ''}{hiddenByFilters > 0 ? `，有 ${hiddenByFilters} 个被页面筛选条件隐藏` : ''}{pipe.retestLatency ? `，已复测延迟 ${Array.from(pipelineView.candidates as Set<string>).filter((k: string) => k in avgLatencyMap).length}/${pipelineView.candidates.size}` : ''}，当前{pipe.showFullResult ? '显示全部（含失败和没测的）' : '只显示达标'}
                                             <button type="button" onClick={() => setPipelineView(null)} className="ml-2 underline">退出优选视图</button>
                                         </span>
                                     )}

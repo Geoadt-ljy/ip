@@ -36,7 +36,8 @@ export interface PipelineConfig {
     dlSeconds: string;            // 限时测速的时长（秒）
 }
 
-const KEY = 'ip-main:pipeline-config';
+const LEGACY_KEY = 'ip-main:pipeline-config';      // 旧版：所有模式共用一份配置
+const KEY = 'ip-main:pipeline-configs-v2';          // 新版：每个 IP 来源模式各一份配置
 const DEFAULTS: PipelineConfig = {
     enabled: false,
     afterScan: false,
@@ -65,23 +66,78 @@ const DEFAULTS: PipelineConfig = {
     dlSeconds: '6',
 };
 
-function load(): PipelineConfig {
+/** IP 来源模式：官方 IP、CM IP、IP 源（第三方）、自定义 IP，各自有一份流水线配置，可互相导入 */
+export type PipelineMode = 'cf' | 'cm' | 'third' | 'custom';
+export const PIPELINE_MODES: PipelineMode[] = ['cf', 'cm', 'third', 'custom'];
+export const PIPELINE_MODE_LABELS: Record<PipelineMode, string> = { cf: '官方 IP', cm: 'CM IP', third: 'IP 源', custom: '自定义 IP' };
+
+function loadAll(): Record<PipelineMode, PipelineConfig> {
+    const result = {} as Record<PipelineMode, PipelineConfig>;
     try {
         const raw = localStorage.getItem(KEY);
-        return { ...DEFAULTS, ...(raw ? JSON.parse(raw) : {}) };
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            for (const m of PIPELINE_MODES) result[m] = { ...DEFAULTS, ...(parsed?.[m] || {}) };
+            return result;
+        }
+        // 从旧版迁移：原来共用的那一份配置，先复制给每个模式，之后各自独立
+        const legacyRaw = localStorage.getItem(LEGACY_KEY);
+        const legacy = { ...DEFAULTS, ...(legacyRaw ? JSON.parse(legacyRaw) : {}) };
+        for (const m of PIPELINE_MODES) result[m] = { ...legacy };
+        return result;
     } catch {
-        return { ...DEFAULTS };
+        for (const m of PIPELINE_MODES) result[m] = { ...DEFAULTS };
+        return result;
     }
 }
 
-let state: PipelineConfig = load();
+let allConfigs: Record<PipelineMode, PipelineConfig> = loadAll();
+let activeMode: PipelineMode = 'cf';
+let state: PipelineConfig = allConfigs[activeMode]; // 当前模式的配置
 const listeners = new Set<() => void>();
 
 export const getPipelineConfig = (): PipelineConfig => state;
 
+function persist(): void {
+    try { localStorage.setItem(KEY, JSON.stringify(allConfigs)); } catch { /* 存储不可用时忽略 */ }
+}
+
 export function setPipelineConfig(patch: Partial<PipelineConfig>): void {
     state = { ...state, ...patch };
-    try { localStorage.setItem(KEY, JSON.stringify(state)); } catch { /* 存储不可用时忽略 */ }
+    allConfigs = { ...allConfigs, [activeMode]: state };
+    persist();
+    listeners.forEach(l => l());
+}
+
+export const getPipelineMode = (): PipelineMode => activeMode;
+
+/** 切换当前模式（由“扫描配置”里选中的 IP 来源决定），读写的配置随之切换 */
+export function setPipelineMode(mode: PipelineMode): void {
+    if (mode === activeMode) return;
+    activeMode = mode;
+    state = allConfigs[mode];
+    listeners.forEach(l => l());
+}
+
+export function usePipelineMode(): PipelineMode {
+    return useSyncExternalStore(subscribe, getPipelineMode);
+}
+
+/** 把另一个模式的流水线配置导入到当前模式（保持当前模式的总开关状态） */
+export function importPipelineConfigFrom(mode: PipelineMode): boolean {
+    if (mode === activeMode || !allConfigs[mode]) return false;
+    setPipelineConfig({ ...allConfigs[mode], enabled: state.enabled });
+    return true;
+}
+
+/** 把当前模式的流水线配置复制到其他所有模式（各自保持原来的总开关状态） */
+export function copyPipelineConfigToAll(): void {
+    const next = { ...allConfigs };
+    for (const m of PIPELINE_MODES) {
+        if (m !== activeMode) next[m] = { ...state, enabled: allConfigs[m].enabled };
+    }
+    allConfigs = next;
+    persist();
     listeners.forEach(l => l());
 }
 
@@ -173,7 +229,8 @@ export async function syncPipelinePresetsFromCloud(): Promise<PresetSyncResult &
 export function loadPipelinePreset(name: string): boolean {
     const pr = presets[name];
     if (!pr) return false;
-    setPipelineConfig({ ...DEFAULTS, ...pr, enabled: state.enabled });
+    // 预设里没有的字段（旧版本保存的预设）保持当前值，不被重置成默认值
+    setPipelineConfig({ ...state, ...pr, enabled: state.enabled });
     return true;
 }
 
