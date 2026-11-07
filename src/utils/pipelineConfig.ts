@@ -26,6 +26,7 @@ export interface PipelineConfig {
     sortKey: PipelineSortKey;
     latencyTolerance: string;     // 延迟复测容差（%）：复测延迟允许超出上限的比例
     lossStrict: boolean;          // 丢包判定：false=只算请求失败；true=延迟尖峰（疑似重传）也算
+    mergeLatencyLoss: boolean;    // 延迟和丢包一起复测：一次探测同时得到延迟和丢包，省去单独的延迟复测
     showFullResult: boolean;      // 显示完整优选结果：成功和失败的都显示
     retestLatency: boolean;       // 复测项目：延迟
     retestDownload: boolean;      // 复测项目：下载速度
@@ -56,6 +57,7 @@ const DEFAULTS: PipelineConfig = {
     sortKey: 'default',
     latencyTolerance: '30',
     lossStrict: true,
+    mergeLatencyLoss: false,
     showFullResult: false,
     retestLatency: false,
     retestDownload: false,

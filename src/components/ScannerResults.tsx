@@ -99,19 +99,22 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
     const downloadBytes = Math.max(1, Math.min(100, Math.floor(Number(downloadSizeMB)) || 25)) * 1024 * 1024;
     const [customDownloadUrlTemplate, setCustomDownloadUrlTemplate] = useState('https://{hexip}.ns.psb.kdns.fr:{port}/__down?bytes={bytes}');
     const [saveSelectedOnly, setSaveSelectedOnly] = useState(true);
-    const filterInitialized = useRef(false);
+    const filterInitFor = useRef<ScanResult[] | null>(null);
 
     const uniqueRegions: string[] = Array.from(new Set(scanResults.map(r => r.colo))).filter((r): r is string => !!r).sort();
     const uniquePorts: number[] = Array.from(new Set(scanResults.map(r => r.port))).sort((a, b) => a - b);
 
     // 结果首次就绪时，默认将全部地区/端口选入集合（真正全选，而非空集代表全选）
     useEffect(() => {
-        if (!filterInitialized.current && uniqueRegions.length > 0) {
+        // 每次有新的扫描结果，都把页面上的地区/端口筛选重置为“全选”，不再沿用上一次扫描时的勾选；
+        // 页面筛选只影响显示，不会影响流水线的地区白名单
+        if (filterInitFor.current !== scanResults && uniqueRegions.length > 0) {
             setSelectedRegions(new Set(uniqueRegions));
             setSelectedPorts(new Set(uniquePorts.map(String)));
-            filterInitialized.current = true;
+            filterInitFor.current = scanResults;
         }
-    }, [uniqueRegions, uniquePorts]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [scanResults]);
 
     // 加载已保存场景名列表，供场景录入框快速选择
     useEffect(() => {
@@ -439,7 +442,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         lines.push(`模式：${PIPELINE_MODE_LABELS[pipeMode]}；扫描结果 ${scanResults.length} 个（域名 ${scanResults.filter(r => r.domain).length} 个不参与测试）`);
         lines.push(`流程：${pipelineView.flow}`);
         lines.push(`达标 ${pipelineView.passed.size}，参与测试 ${pipelineView.candidates.size}，没进入测试 ${pipelineView.others.size}，已勾选 ${pipelineView.selected.size}`);
-        lines.push(`配置：延迟${autoLatencyOn ? `≤${autoLatencyMax}ms` : '不限'}，地区白名单 ${pipe.regions || '不限'}，候选数量 ${autoCandidates}，下载${autoDlOn ? `≥${autoDlMin}Mbps` : '不限'}，丢包${autoLossOn ? `≤${autoLossMax}%` : '不限'}，复测延迟${pipe.retestLatency ? '开' : '关'}，轮数 ${avgRounds}，并发 ${pipe.retestConcurrency}，统计 ${pipe.retestStat}，最终保留 ${autoKeep}`);
+        lines.push(`配置：延迟${autoLatencyOn ? `≤${autoLatencyMax}ms` : '不限'}，地区白名单 ${pipe.regions || '不限'}，候选数量 ${autoCandidates}，下载${autoDlOn ? `≥${autoDlMin}Mbps` : '不限'}，丢包${autoLossOn ? `≤${autoLossMax}%` : '不限'}，复测延迟${pipe.retestLatency ? '开' : '关'}，延迟丢包合并${pipe.mergeLatencyLoss ? '开' : '关'}，轮数 ${avgRounds}，并发 ${pipe.retestConcurrency}，统计 ${pipe.retestStat}，最终保留 ${autoKeep}`);
         if (pipelineView.integrity.length > 0) {
             lines.push('任务数核对：');
             pipelineView.integrity.forEach(t => lines.push(`  ${t}`));
@@ -471,7 +474,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
     const capByRegion = (list: ScanResult[], k: number, limits: Record<string, number> = {}) => capByRegionShared(list, k, limits);
 
     // 多轮测量核心：对给定 IP 重复 N 轮，按所选指标（延迟/下载速度/丢包率）取平均，并写入各结果表
-    const runMeasure = async (targets: ScanResult[], metrics: MeasureMetrics, rounds: number, opts?: { latencyTimeout?: number; concurrency?: number }): Promise<{ data: Record<string, Measured>; aborted: boolean; stats: PoolStats }> => {
+    const runMeasure = async (targets: ScanResult[], metrics: MeasureMetrics, rounds: number, opts?: { latencyTimeout?: number; concurrency?: number; merge?: boolean }): Promise<{ data: Record<string, Measured>; aborted: boolean; stats: PoolStats }> => {
         const controller = new AbortController();
         avgAbortRef.current = controller;
         const signal = controller.signal;
@@ -505,7 +508,8 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                     let interrupted = false;
                     for (let i = 0; i < rounds && !signal.aborted; i++) {
                         try {
-                        if (metrics.latency) {
+                        // 延迟和丢包一起复测时，延迟直接取丢包探测的往返耗时中位数，不再单独测延迟
+                        if (metrics.latency && !(opts?.merge && metrics.loss)) {
                             const r = await testIpLatency(target.ip, target.port, opts?.latencyTimeout ?? 3000);
                             if (r.latency > 0) lats.push(r.latency);
                         }
@@ -523,7 +527,11 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                         if (metrics.loss && !signal.aborted) {
                             const r = await testBrowserPacketLoss(target.ip, target.port, { countSpikes: pipe.lossStrict, attempts: 10, timeoutMs: 3000, urlTemplate: packetLossUrlTemplate, signal });
                             if (r.aborted) { interrupted = true; break; }
-                            if (!r.error) { sent += r.sent; received += r.received; }
+                            if (!r.error) {
+                                sent += r.sent;
+                                received += r.received;
+                                if (opts?.merge && metrics.latency && r.medianRtt) lats.push(Math.max(1, Math.round(r.medianRtt)));
+                            }
                         }
                         } catch { /* 这一轮出错按失败处理，继续下一轮，不影响其余 IP */ }
                     }
@@ -573,7 +581,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
             return;
         }
         const rounds = Math.floor(num(avgRounds, 3, 1, 10));
-        const { data, aborted, stats } = await runMeasure(targets, avgMetrics, rounds);
+        const { data, aborted, stats } = await runMeasure(targets, avgMetrics, rounds, { merge: pipe.mergeLatencyLoss });
         const problem = describePool('平均值测试', stats);
         if (problem) showToast(problem, 'warning');
         const n = Object.keys(data).length;
@@ -603,6 +611,8 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         const dlThresholdOf = (c: ScanResult): number | undefined => dlMins[(c.colo || '').toUpperCase()] ?? (autoDlOn ? dlMin : undefined);
         const needLoss = autoLossOn || pipe.retestLoss || sortKey === 'loss';
         const needDl = autoDlOn || Object.keys(dlMins).length > 0 || sortKey === 'download' || pipe.retestDownload;
+        // 延迟和丢包一起复测：只有确实要测丢包、且不是“按现有数据重新筛选”时才合并
+        const merged = pipe.mergeLatencyLoss && needLoss && mode !== 'refilter';
 
         let candidates: ScanResult[];
         let poolSize = 0; // 扫描合格（延迟达标）的 IP 总数，用于对账
@@ -677,14 +687,14 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
             const tolPct = num(pipe.latencyTolerance, 30, 0, 300);
             const latCeil = autoLatencyOn ? latMax * (1 + tolPct / 100) : Infinity;
             if (mode !== 'refilter') {
-                if (pipe.retestLatency) {
-                    setAutoStageText(`阶段 1/3 复测延迟（${candidates.length} 个）`);
-                    const r1 = await runMeasure(candidates, { latency: true, download: false, loss: false }, rounds);
+                if (pipe.retestLatency || merged) {
+                    setAutoStageText(`阶段 1/3 ${merged ? '复测延迟和丢包' : '复测延迟'}（${candidates.length} 个）`);
+                    const r1 = await runMeasure(candidates, { latency: true, download: false, loss: merged }, rounds, merged ? { merge: true } : undefined);
                     if (r1.aborted) { interrupted(); return; }
                     Object.assign(data, r1.data);
-                    checkStage('延迟复测', r1);
+                    checkStage(merged ? '延迟丢包复测' : '延迟复测', r1);
                     // 补测：所有轮次都没测到的 IP，用更长的超时、低并发再测一次，避免偶发失败造成漏测
-                    const missing = candidates.filter(c => data[speedKey(c)]?.lat === undefined);
+                    const missing = merged ? [] : candidates.filter(c => data[speedKey(c)]?.lat === undefined);
                     if (missing.length > 0) {
                         setAutoStageText(`阶段 1/3 补测延迟（${missing.length} 个没测到的）`);
                         const r1b = await runMeasure(missing, { latency: true, download: false, loss: false }, 1, { latencyTimeout: 6000, concurrency: 2 });
@@ -707,7 +717,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
 
             // 阶段 2：丢包率，只测延迟合格的，筛掉不合格的
             if (needLoss && alive.length > 0) {
-                if (mode !== 'refilter') {
+                if (mode !== 'refilter' && !merged) {
                     setAutoStageText(`阶段 2/3 测丢包（${alive.length} 个）`);
                     const r2 = await runMeasure(alive, { latency: false, download: false, loss: true }, rounds);
                     if (r2.aborted) { interrupted(); return; }

@@ -187,6 +187,10 @@ export function PipelineSettings({ disabled = false }: { disabled?: boolean }) {
                         <label className="flex items-center gap-1"><input type="checkbox" checked={c.retestLatency} onChange={(e) => set({ retestLatency: e.target.checked })} disabled={disabled} />延迟</label>
                         <label className="flex items-center gap-1"><input type="checkbox" checked={c.retestDownload} onChange={(e) => set({ retestDownload: e.target.checked })} disabled={disabled} />下载速度</label>
                         <label className="flex items-center gap-1"><input type="checkbox" checked={c.retestLoss} onChange={(e) => set({ retestLoss: e.target.checked })} disabled={disabled} />丢包率</label>
+                        <label className="flex items-center gap-1" title="开启后，丢包测试的每次探测同时给出延迟（取中位数），一次测完，不再单独复测延迟，候选里延迟大多合格时能省一大截时间；但候选里延迟不合格的很多时反而更慢，因为它们也要做完整的丢包探测。默认关闭">
+                            <input type="checkbox" checked={c.mergeLatencyLoss} onChange={(e) => set({ mergeLatencyLoss: e.target.checked })} disabled={disabled} />
+                            延迟和丢包一起复测（默认关闭）
+                        </label>
                         <label className="flex items-center gap-1">延迟复测容差 +
                             <input type="number" min={0} max={300} value={c.latencyTolerance} onChange={(e) => set({ latencyTolerance: e.target.value })} disabled={disabled} className={`w-14 ${numCls}`} title="复测延迟时允许超出延迟上限的比例，避免并发和抖动把扫描时合格的 IP 误淘汰" /> %
                         </label>

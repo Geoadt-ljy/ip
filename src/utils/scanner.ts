@@ -456,7 +456,7 @@ export async function testBrowserPacketLoss(
     ip: string,
     port: number,
     options: { attempts?: number; timeoutMs?: number; urlTemplate?: string; signal?: AbortSignal; countSpikes?: boolean } = {},
-): Promise<{ packetLoss: number; sent: number; received: number; error?: string; aborted?: boolean; spikes?: number; jitterMs?: number }> {
+): Promise<{ packetLoss: number; sent: number; received: number; error?: string; aborted?: boolean; spikes?: number; jitterMs?: number; medianRtt?: number }> {
     if (isIPv6(ip) || isDomainName(ip)) {
         return { packetLoss: 100, sent: 0, received: 0, error: '浏览器丢包测试目前仅支持 IPv4 IP' };
     }
@@ -520,6 +520,13 @@ export async function testBrowserPacketLoss(
 
     let spikes = 0;
     let jitterMs = 0;
+    let medianRtt: number | undefined;
+    if (rtts.length >= 1) {
+        // 成功探测的往返耗时中位数，可直接当作这个 IP 的延迟（用于“延迟和丢包一起复测”）
+        const sortedRtts = [...rtts].sort((a, b) => a - b);
+        const mid = Math.floor(sortedRtts.length / 2);
+        medianRtt = sortedRtts.length % 2 ? sortedRtts[mid] : (sortedRtts[mid - 1] + sortedRtts[mid]) / 2;
+    }
     if (rtts.length >= 3) {
         const sorted = [...rtts].sort((a, b) => a - b);
         const median = sorted[Math.floor(sorted.length / 2)];
@@ -538,6 +545,7 @@ export async function testBrowserPacketLoss(
         received,
         spikes,
         jitterMs,
+        medianRtt,
     };
 }
 
