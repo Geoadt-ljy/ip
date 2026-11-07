@@ -248,6 +248,11 @@ export async function testIpLatency(ip: string, port: number, timeout: number): 
             if (cand.domain && cand.domain !== memoryTestDomain) cacheTestDomain(cand.domain);
             return { latency: Math.max(1, Math.round(performance.now() - secondRequestStart)), colo };
         } catch (error: any) {
+            // 测试域名已体检过：超时说明是这个 IP 慢或不通，不是域名的问题，不必再换域名重试（避免死 IP 白等两倍超时）
+            if (error?.name === 'AbortError' && activeTestDomains && activeTestDomains.length > 0) {
+                lastError = '超时';
+                break;
+            }
             lastError = error?.name === 'AbortError' ? '超时' : '错误';
         } finally {
             clearTimeout(timeoutId);

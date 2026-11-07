@@ -11,7 +11,8 @@ import { useToast } from './Toast';
 import { useConfirm } from './ConfirmDialog';
 import { ListFilter, Save, X } from 'lucide-react';
 import { RegionDisplay } from './RegionDisplay';
-import { usePipelineConfig, parseRegionRules, regionLimits, regionDlMins, capByRegion as capByRegionShared, type PipelineSortKey } from '../utils/pipelineConfig';
+import { usePipelineConfig, usePipelineMode, PIPELINE_MODE_LABELS, parseRegionRules, regionLimits, regionDlMins, capByRegion as capByRegionShared, type PipelineSortKey } from '../utils/pipelineConfig';
+import { runPool, describePool, emptyPoolStats, type PoolStats } from '../utils/pool';
 
 interface IpScannerResultsAndSaveProps {
     scanResults: ScanResult[];
@@ -55,7 +56,8 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
     const [autoRunning, setAutoRunning] = useState(false);
     const [autoStageText, setAutoStageText] = useState('');
     // 优选视图：候选 / 达标 / 勾选 的 IP，以及每个被淘汰 IP 的原因
-    const [pipelineView, setPipelineView] = useState<null | { candidates: Set<string>; others: Set<string>; passed: Set<string>; selected: Set<string>; reasons: Record<string, string> }>(null);
+    const [pipelineView, setPipelineView] = useState<null | { candidates: Set<string>; others: Set<string>; passed: Set<string>; selected: Set<string>; reasons: Record<string, string>; flow: string; integrity: string[] }>(null);
+    const pipeMode = usePipelineMode();
     const [pipe, setPipe] = usePipelineConfig(); // 流水线统一配置（与“扫描配置”共用）
     const autoEnabled = pipe.enabled;
     const autoAfterScan = pipe.afterScan;
@@ -331,11 +333,8 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         let done = 0;
         try {
             // 控制并发，避免同时建立过多连接；支持单个或多个 IP。
-            const queue = [...targets];
-            const worker = async () => {
-                while (queue.length && !signal.aborted) {
-                    const target = queue.shift();
-                    if (!target) return;
+            // 并发任务池：每个 IP 只领取一次，单个 IP 出错不影响其余，已完成的结果不会丢
+            const speedPool = await runPool(targets, 3, async (target) => {
                     const key = speedKey(target);
                     const selectedTemplate = downloadTestAddress === 'ns'
                         ? 'https://{hexip}.ns.psb.kdns.fr:{port}/__down?bytes={bytes}'
@@ -350,18 +349,17 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                         ...(selectedTemplate ? { urlTemplate: selectedTemplate } : {}),
                     });
                     // 被用户中断的目标不记为失败，保持“未测”状态
-                    if (result.aborted) return;
+                    if (result.aborted) return 'skip';
                     if (result.downloadMbps > 0) {
                         setBrowserSpeedMap(prev => ({ ...prev, [key]: result.downloadMbps }));
                     } else {
                         setBrowserSpeedErrors(prev => ({ ...prev, [key]: result.error || '测速失败' }));
                     }
                     setSpeedPending(prev => { const next = { ...prev }; delete next[key]; return next; });
-                    done++;
-                    setBrowserSpeedDone(done);
-                }
-            };
-            await Promise.all(Array.from({ length: Math.min(3, targets.length) }, () => worker()));
+                    return result.downloadMbps > 0 ? 'ok' : 'fail';
+            }, { signal, onProgress: (n) => { done = n; setBrowserSpeedDone(n); } });
+            const speedProblem = describePool('下载测速', speedPool);
+            if (speedProblem) showToast(speedProblem, 'warning');
             if (signal.aborted) {
                 showToast(`已中断下载测速：完成 ${done}/${targets.length} 个 IP`, 'warning');
             } else {
@@ -394,21 +392,16 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         setPacketLossDone(0);
         let done = 0;
         try {
-            const queue = [...targets];
-            const worker = async () => {
-                while (queue.length > 0 && !signal.aborted) {
-                    const target = queue.shift();
-                    if (!target) return;
+            const lossPool = await runPool(targets, 3, async (target) => {
                     const key = speedKey(target);
                     const result = await testBrowserPacketLoss(target.ip, target.port, { countSpikes: pipe.lossStrict, attempts: 10, timeoutMs: 3000, urlTemplate: packetLossUrlTemplate, signal });
                     // 被中断的目标探测不完整，丢包率不可信，不记录结果
-                    if (result.aborted) return;
+                    if (result.aborted) return 'skip';
                     setPacketLossMap(prev => ({ ...prev, [key]: result }));
-                    done++;
-                    setPacketLossDone(done);
-                }
-            };
-            await Promise.all(Array.from({ length: Math.min(3, targets.length) }, () => worker()));
+                    return result.error ? 'fail' : 'ok';
+            }, { signal, onProgress: (n) => { done = n; setPacketLossDone(n); } });
+            const lossProblem = describePool('丢包测试', lossPool);
+            if (lossProblem) showToast(lossProblem, 'warning');
             if (signal.aborted) {
                 showToast(`已中断丢包测试：已完成 ${done}/${targets.length} 个 IP`, 'warning');
             } else {
@@ -436,6 +429,39 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         return null;
     };
 
+    // 诊断信息：每个 IP 为什么没测/被淘汰，按原因汇总，并附上各阶段的任务数核对，方便核对有没有漏测
+    const buildDiagnostic = (): string => {
+        if (!pipelineView) return '';
+        const group = (why: string) => why.replace(/\d+(\.\d+)?/g, 'N');
+        const counts: Record<string, number> = {};
+        (Object.values(pipelineView.reasons) as string[]).forEach(w => { const g = group(w); counts[g] = (counts[g] || 0) + 1; });
+        const lines: string[] = [];
+        lines.push(`模式：${PIPELINE_MODE_LABELS[pipeMode]}；扫描结果 ${scanResults.length} 个（域名 ${scanResults.filter(r => r.domain).length} 个不参与测试）`);
+        lines.push(`流程：${pipelineView.flow}`);
+        lines.push(`达标 ${pipelineView.passed.size}，参与测试 ${pipelineView.candidates.size}，没进入测试 ${pipelineView.others.size}，已勾选 ${pipelineView.selected.size}`);
+        lines.push(`配置：延迟${autoLatencyOn ? `≤${autoLatencyMax}ms` : '不限'}，地区白名单 ${pipe.regions || '不限'}，候选数量 ${autoCandidates}，下载${autoDlOn ? `≥${autoDlMin}Mbps` : '不限'}，丢包${autoLossOn ? `≤${autoLossMax}%` : '不限'}，复测延迟${pipe.retestLatency ? '开' : '关'}，轮数 ${avgRounds}，并发 ${pipe.retestConcurrency}，统计 ${pipe.retestStat}，最终保留 ${autoKeep}`);
+        if (pipelineView.integrity.length > 0) {
+            lines.push('任务数核对：');
+            pipelineView.integrity.forEach(t => lines.push(`  ${t}`));
+        }
+        lines.push('原因统计：');
+        Object.entries(counts).sort((a, b) => b[1] - a[1]).forEach(([w, n]) => lines.push(`  ${w}：${n} 个`));
+        const examples = (Object.entries(pipelineView.reasons) as [string, string][]).filter(([, w]) => !w.startsWith('达标')).slice(0, 30);
+        if (examples.length > 0) {
+            lines.push('示例（前 30 个）：');
+            examples.forEach(([k, w]) => lines.push(`  ${k}  ${w}`));
+        }
+        return lines.join('\n');
+    };
+    const copyDiagnostic = async () => {
+        try {
+            await navigator.clipboard.writeText(buildDiagnostic());
+            showToast('诊断信息已复制，可以直接粘贴发给我', 'success');
+        } catch {
+            showToast('复制失败：浏览器未授权剪贴板', 'error');
+        }
+    };
+
     type Measured = { lat?: number; dl?: number; loss?: number };
     type MeasureMetrics = { latency: boolean; download: boolean; loss: boolean };
     const num = (v: string, def: number, min: number, max: number) => {
@@ -445,7 +471,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
     const capByRegion = (list: ScanResult[], k: number, limits: Record<string, number> = {}) => capByRegionShared(list, k, limits);
 
     // 多轮测量核心：对给定 IP 重复 N 轮，按所选指标（延迟/下载速度/丢包率）取平均，并写入各结果表
-    const runMeasure = async (targets: ScanResult[], metrics: MeasureMetrics, rounds: number, opts?: { latencyTimeout?: number; concurrency?: number }): Promise<{ data: Record<string, Measured>; aborted: boolean }> => {
+    const runMeasure = async (targets: ScanResult[], metrics: MeasureMetrics, rounds: number, opts?: { latencyTimeout?: number; concurrency?: number }): Promise<{ data: Record<string, Measured>; aborted: boolean; stats: PoolStats }> => {
         const controller = new AbortController();
         avgAbortRef.current = controller;
         const signal = controller.signal;
@@ -468,13 +494,9 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
             : downloadTestAddress === 'bestcf'
                 ? 'https://{hexip}.bestcf.cmliussss.hidns.vip:{port}/__down?bytes={bytes}'
                 : downloadTestAddress === 'custom' ? customDownloadUrlTemplate.trim() : undefined;
-        let done = 0;
+        let poolStats: PoolStats = emptyPoolStats(targets.length);
         try {
-            const queue = [...targets];
-            const worker = async () => {
-                while (queue.length > 0 && !signal.aborted) {
-                    const target = queue.shift();
-                    if (!target) return;
+            poolStats = await runPool(targets, opts?.concurrency ?? concurrency, async (target) => {
                     const key = speedKey(target);
                     const lats: number[] = [];
                     const dls: number[] = [];
@@ -506,7 +528,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                         } catch { /* 这一轮出错按失败处理，继续下一轮，不影响其余 IP */ }
                     }
                     // 被中断的目标数据不完整，不记录
-                    if (interrupted || signal.aborted) return;
+                    if (interrupted || signal.aborted) return 'skip';
                     // 统计方式：中位数不受个别异常值影响，平均值反映整体水平
                     const mean = (a: number[]) => {
                         if (!useMedian) return a.reduce((x, y) => x + y, 0) / a.length;
@@ -528,18 +550,15 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                         setPacketLossMap(prev => ({ ...prev, [key]: { packetLoss: m.loss as number, sent, received } }));
                     }
                     data[key] = m;
-                    done++;
-                    setAvgDone(done);
-                }
-            };
-            await Promise.all(Array.from({ length: Math.min(opts?.concurrency ?? concurrency, targets.length) }, () => worker()));
+                    return m.lat !== undefined || m.dl !== undefined || m.loss !== undefined ? 'ok' : 'fail';
+            }, { signal, onProgress: (n) => setAvgDone(n) });
         } finally {
             setIsAvgTesting(false);
             setSpeedPending({});
             if (avgAbortRef.current === controller) avgAbortRef.current = null;
             wakeLock?.release().catch(() => undefined);
         }
-        return { data, aborted: signal.aborted };
+        return { data, aborted: signal.aborted, stats: poolStats };
     };
 
     // 手动：对勾选的 IP 做多轮平均测试
@@ -554,7 +573,9 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
             return;
         }
         const rounds = Math.floor(num(avgRounds, 3, 1, 10));
-        const { data, aborted } = await runMeasure(targets, avgMetrics, rounds);
+        const { data, aborted, stats } = await runMeasure(targets, avgMetrics, rounds);
+        const problem = describePool('平均值测试', stats);
+        if (problem) showToast(problem, 'warning');
         const n = Object.keys(data).length;
         showToast(aborted ? `已中断平均值测试：完成 ${n}/${targets.length} 个 IP` : `平均值测试完成：${n} 个 IP，每个 ${rounds} 轮`, aborted ? 'warning' : 'success');
     };
@@ -568,8 +589,8 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         if (isAvgTesting || isBrowserSpeedTesting || isPacketLossTesting || autoRunning) return;
         const latMax = autoLatencyOn ? num(autoLatencyMax, 300, 1, 100000) : Infinity;
         const perRegion = Math.floor(num(autoPerRegion, 0, 0, 100000)); // 只用于最终结果，不减少参与测试的 IP
-        const candN = Math.floor(num(autoCandidates, 30, 0, 100000)); // 0=不限
-        const keepN = Math.floor(num(autoKeep, 20, 0, 100000)); // 0=不限
+        const candN = Math.floor(num(autoCandidates, 0, 0, 100000)); // 0=不限
+        const keepN = Math.floor(num(autoKeep, 0, 0, 100000)); // 0=不限
         const dlMin = num(autoDlMin, 10, 0, 100000);
         const lossMax = num(autoLossMax, 10, 0, 100);
         const rounds = Math.floor(num(avgRounds, 3, 1, 10));
@@ -584,14 +605,16 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         const needDl = autoDlOn || Object.keys(dlMins).length > 0 || sortKey === 'download' || pipe.retestDownload;
 
         let candidates: ScanResult[];
+        let poolSize = 0; // 扫描合格（延迟达标）的 IP 总数，用于对账
         if (mode === 'full') {
+            // 候选只看：扫描延迟 ≤ 上限、流水线的地区白名单。结果页上的地区/端口筛选只影响显示，
+            // 不参与候选，避免旧的勾选状态悄悄把合格的 IP 排除在测试之外
             const pool = scanResults
                 .filter(r => !r.domain && r.latency > 0 && r.latency <= latMax
-                    && (selectedPorts.size === 0 || selectedPorts.has(String(r.port)))
-                    && (selectedRegions.size === 0 || !r.colo || selectedRegions.has(r.colo))
                     && (regionList.length === 0 || !r.colo || regionList.includes(r.colo.toUpperCase())))
                 .sort((a, b) => a.latency - b.latency);
             // 测试前不按地区限制数量，所有合格的 IP 都进入测试；地区上限只在最终结果里生效
+            poolSize = pool.length;
             candidates = candN > 0 ? pool.slice(0, candN) : pool;
             if (candN === 0 && candidates.length > 300) showToast(`候选数量不限，共 ${candidates.length} 个 IP 进入复测，会比较久`, 'info');
             if (candidates.length === 0) {
@@ -616,8 +639,6 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                 if (candSet.has(k)) continue;
                 excluded[k] = r.latency <= 0 ? '扫描时延迟测试失败'
                     : r.latency > latMax ? `扫描延迟 ${r.latency}ms 超过上限 ${latMax}ms`
-                    : (selectedPorts.size > 0 && !selectedPorts.has(String(r.port))) ? `端口 ${r.port} 在结果页端口筛选里没有勾选`
-                    : (selectedRegions.size > 0 && r.colo && !selectedRegions.has(r.colo)) ? `地区 ${r.colo} 在结果页地区筛选里没有勾选`
                     : (regionList.length > 0 && r.colo && !regionList.includes(r.colo.toUpperCase())) ? `地区 ${r.colo} 不在流水线地区白名单里`
                     : `超出候选数量 ${candN}`;
             }
@@ -625,6 +646,13 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
         const data: Record<string, Measured> = {};
         const reasons: Record<string, string> = {};
         const drop = (c: ScanResult, why: string) => { reasons[speedKey(c)] = why; };
+        // 任务数核对：每个阶段测完后核对“处理了多少 / 应该测多少”，有异常或不一致会提示，并写进诊断信息
+        const integrityNotes: string[] = [];
+        const checkStage = (label: string, r: { stats: PoolStats }) => {
+            const problem = describePool(label, r.stats);
+            if (problem) { integrityNotes.push(problem); showToast(problem, 'warning'); }
+            else integrityNotes.push(`${label}：已处理 ${r.stats.processed}/${r.stats.total}，完整`);
+        };
         setAutoRunning(true);
         try {
             if (mode === 'refilter') {
@@ -654,6 +682,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                     const r1 = await runMeasure(candidates, { latency: true, download: false, loss: false }, rounds);
                     if (r1.aborted) { interrupted(); return; }
                     Object.assign(data, r1.data);
+                    checkStage('延迟复测', r1);
                     // 补测：所有轮次都没测到的 IP，用更长的超时、低并发再测一次，避免偶发失败造成漏测
                     const missing = candidates.filter(c => data[speedKey(c)]?.lat === undefined);
                     if (missing.length > 0) {
@@ -661,6 +690,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                         const r1b = await runMeasure(missing, { latency: true, download: false, loss: false }, 1, { latencyTimeout: 6000, concurrency: 2 });
                         if (r1b.aborted) { interrupted(); return; }
                         for (const [k, m] of Object.entries(r1b.data)) data[k] = { ...(data[k] || {}), ...m };
+                        checkStage('延迟补测', r1b);
                     }
                 } else {
                     for (const c of candidates) data[speedKey(c)] = { lat: c.latency > 0 ? c.latency : undefined };
@@ -668,7 +698,8 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
             }
             let alive = candidates.filter(c => {
                 const m = data[speedKey(c)];
-                if (!m || m.lat === undefined) { drop(c, '延迟测试失败'); return false; }
+                if (!m) { drop(c, '没有测试结果（测试异常或被中断）'); return false; }
+                if (m.lat === undefined) { drop(c, '延迟测试失败'); return false; }
                 if (autoLatencyOn && m.lat > latCeil) { drop(c, `延迟 ${m.lat}ms 超过 ${Math.round(latCeil)}ms（上限 ${latMax}ms + 容差 ${tolPct}%）`); return false; }
                 return true;
             });
@@ -681,6 +712,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                     const r2 = await runMeasure(alive, { latency: false, download: false, loss: true }, rounds);
                     if (r2.aborted) { interrupted(); return; }
                     for (const [k, m] of Object.entries(r2.data)) data[k] = { ...(data[k] || {}), ...m };
+                    checkStage('丢包测试', r2);
                 }
                 if (autoLossOn) {
                     alive = alive.filter(c => {
@@ -703,6 +735,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                     const r3 = await runMeasure(dlTargets, { latency: false, download: true, loss: false }, rounds);
                     if (r3.aborted) { interrupted(); return; }
                     for (const [k, m] of Object.entries(r3.data)) data[k] = { ...(data[k] || {}), ...m };
+                    checkStage('下载测试', r3);
                 }
                 const tested = mode === 'refilter' ? null : new Set(dlTargets.map(speedKey));
                 alive = alive.filter(c => {
@@ -732,18 +765,19 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
             const finalKeys = new Set(finalList.map(speedKey));
             passed.forEach(c => { if (!finalKeys.has(speedKey(c))) reasons[speedKey(c)] = '达标，但超出保留个数/地区上限，未勾选'; });
             setSelectedSpeedTargets(finalKeys);
+            // 各阶段留下的数量，方便看出在哪一步淘汰得最多
+            const flow = `${mode === 'full' ? `扫描合格 ${poolSize} → ` : ''}${mode === 'full' ? '候选' : '参与'} ${candidates.length} → 延迟 ${nLat}${needLoss ? ` → 丢包 ${nLoss}` : ''}${needDl ? ` → 下载 ${nDl}` : ''}`;
             setPipelineView({
                 candidates: new Set(candidates.map(speedKey)),
                 others: new Set(Object.keys(excluded)),
                 passed: new Set(passed.map(speedKey)),
                 selected: finalKeys,
                 reasons: { ...excluded, ...reasons },
+                flow,
+                integrity: integrityNotes,
             });
             if (sortKey === 'default') setSortKey('latency');
             const label = mode === 'refilter' ? '重新筛选完成' : mode === 'selected' ? '再优选完成' : '自动优选完成';
-            const who = mode === 'full' ? '候选' : '参与';
-            // 各阶段留下的数量，方便看出在哪一步淘汰得最多
-            const flow = `${who} ${candidates.length} → 延迟 ${nLat}${needLoss ? ` → 丢包 ${nLoss}` : ''}${needDl ? ` → 下载 ${nDl}` : ''}`;
             showToast(
                 finalList.length > 0
                     ? `${label}：${flow}，达标 ${passed.length} 个，已勾选前 ${finalList.length} 个`
@@ -967,6 +1001,7 @@ export function ScannerResults({ scanResults, onSaveSuccess, onScenesChanged }: 
                                         <span className="text-gray-500 dark:text-gray-400">
                                             优选结果：达标 {pipelineView.passed.size} / 参与测试 {pipelineView.candidates.size}{pipelineView.others.size > 0 ? `（另有 ${pipelineView.others.size} 个没进入测试）` : ''}{hiddenByFilters > 0 ? `，有 ${hiddenByFilters} 个被页面筛选条件隐藏` : ''}{pipe.retestLatency ? `，已复测延迟 ${Array.from(pipelineView.candidates as Set<string>).filter((k: string) => k in avgLatencyMap).length}/${pipelineView.candidates.size}` : ''}，当前{pipe.showFullResult ? '显示全部（含失败和没测的）' : '只显示达标'}
                                             <button type="button" onClick={() => setPipelineView(null)} className="ml-2 underline">退出优选视图</button>
+                                            <button type="button" onClick={() => void copyDiagnostic()} className="ml-2 underline" title="把每个 IP 没测或被淘汰的原因按类汇总，并附上各阶段任务数核对结果，方便核对有没有漏测">复制诊断信息</button>
                                         </span>
                                     )}
                                     <label className="flex items-center gap-1">排序

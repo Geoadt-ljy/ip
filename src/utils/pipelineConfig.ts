@@ -161,6 +161,7 @@ export function resetPipelineConfig(): void {
 // ---------- 已保存的流水线预设（不含总开关） ----------
 export type PipelinePreset = Omit<PipelineConfig, 'enabled'>;
 const PRESET_KEY = 'ip-main:pipeline-presets';
+const PRESET_MIGRATED_KEY = 'ip-main:pipeline-presets-migrated';
 
 function loadPresets(): Record<string, PipelinePreset> {
     try {
@@ -190,6 +191,7 @@ export function usePipelinePresets(): Record<string, PipelinePreset> {
 
 export interface PresetSyncResult { cloud: boolean; error?: string }
 
+const markCloudSynced = () => { try { localStorage.setItem(PRESET_MIGRATED_KEY, '1'); } catch { /* 忽略 */ } };
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const asCloud = (p: Record<string, PipelinePreset>) => p as unknown as Record<string, Record<string, unknown>>;
 
@@ -204,6 +206,7 @@ export async function savePipelinePreset(name: string): Promise<PresetSyncResult
         const next = { ...remote, [name]: preset };
         await savePipelinePresets(asCloud(next));
         commitPresets(next);
+        markCloudSynced();
         return { cloud: true };
     } catch (e) {
         return { cloud: false, error: errText(e) };
@@ -214,10 +217,16 @@ export async function savePipelinePreset(name: string): Promise<PresetSyncResult
 export async function syncPipelinePresetsFromCloud(): Promise<PresetSyncResult & { migrated?: boolean }> {
     try {
         const remote = (await getPipelinePresets()) as unknown as Record<string, PipelinePreset>;
-        if (Object.keys(remote).length === 0 && Object.keys(presets).length > 0) {
+        let migratedBefore = false;
+        try { migratedBefore = localStorage.getItem(PRESET_MIGRATED_KEY) === '1'; } catch { /* 忽略 */ }
+        // 只在“云端为空、本地已有、且从未同步过”时把本地配置迁移上去；
+        // 同步过之后云端就是准的，别的设备删光了配置，本地不能再把它们“复活”
+        if (Object.keys(remote).length === 0 && Object.keys(presets).length > 0 && !migratedBefore) {
             await savePipelinePresets(asCloud(presets));
+            markCloudSynced();
             return { cloud: true, migrated: true };
         }
+        markCloudSynced();
         commitPresets(remote);
         return { cloud: true };
     } catch (e) {
@@ -244,6 +253,7 @@ export async function deletePipelinePreset(name: string): Promise<PresetSyncResu
         delete next[name];
         await savePipelinePresets(asCloud(next));
         commitPresets(next);
+        markCloudSynced();
         return { cloud: true };
     } catch (e) {
         return { cloud: false, error: errText(e) };

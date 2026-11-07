@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, ChangeEvent } from 'react';
 import { getScenes, getSceneResults, saveResults, deleteScene, renameScene } from '../api';
 import { getLatencyColor, ScanResult, testIpLatency, testBrowserDownloadSpeed, resolveDomainToIp } from '../utils/scanner';
+import { runPool, describePool, type PoolStats } from '../utils/pool';
 import { compositeScore, normalizeWeights } from '../../functions/_lib/score';
 import { getColoName } from '../utils/colo';
 import { useToast } from './Toast';
@@ -255,23 +256,19 @@ export function SavedIpList() {
         const flags: Record<string, string> = {};
         let done = 0;
         let latencyOk = 0;
+        let speedStats: PoolStats | null = null;
 
         try {
             // 阶段一：复测延迟
-            const queue = [...targets];
-            const latencyWorker = async () => {
-                while (queue.length > 0 && !signal.aborted) {
-                    const item = queue.shift();
-                    if (!item) return;
+            // 并发任务池：每个 IP 只领取一次，单个 IP 出错不影响其余，已完成的结果不会丢
+            const latencyStats = await runPool(targets, RETEST_LATENCY_WORKERS, async (item) => {
                     const id = itemId(item);
                     let host = item.ip;
                     if (item.domain) {
                         const resolved = await resolveDomainToIp(item.ip);
                         if (!resolved) {
                             flags[id] = '域名解析失败';
-                            done++;
-                            setRetestDone(done);
-                            continue;
+                            return 'fail';
                         }
                         host = resolved;
                     }
@@ -286,11 +283,8 @@ export function SavedIpList() {
                     } else {
                         flags[id] = '超时/不可达';
                     }
-                    done++;
-                    setRetestDone(done);
-                }
-            };
-            await Promise.all(Array.from({ length: Math.min(RETEST_LATENCY_WORKERS, targets.length) }, () => latencyWorker()));
+                    return r.latency > 0 ? 'ok' : 'fail';
+            }, { signal, onProgress: (n) => { done = n; setRetestDone(n); } });
 
             // 阶段二（可选）：只复测“原来测过速度、且延迟复测成功”的 IPv4
             if (includeSpeedRetest && !signal.aborted) {
@@ -299,19 +293,14 @@ export function SavedIpList() {
                 );
                 setRetestDone(0);
                 setRetestTotal(speedTargets.length);
-                let speedDone = 0;
-                const speedQueue = [...speedTargets];
-                const speedWorker = async () => {
-                    while (speedQueue.length > 0 && !signal.aborted) {
-                        const item = speedQueue.shift();
-                        if (!item) return;
+                speedStats = await runPool(speedTargets, RETEST_SPEED_WORKERS, async (item) => {
                         const id = itemId(item);
                         const result = await testBrowserDownloadSpeed(item.ip, item.port, {
                             bytes: RETEST_SPEED_BYTES,
                             timeoutMs: 30000,
                             signal,
                         });
-                        if (result.aborted) return;
+                        if (result.aborted) return 'skip';
                         const old = item.downloadMbps || 0;
                         if (result.downloadMbps > 0) {
                             const ratio = result.downloadMbps / old;
@@ -322,12 +311,15 @@ export function SavedIpList() {
                         } else {
                             flags[id] = '测速失败';
                         }
-                        speedDone++;
-                        setRetestDone(speedDone);
-                    }
-                };
-                await Promise.all(Array.from({ length: Math.min(RETEST_SPEED_WORKERS, speedTargets.length) }, () => speedWorker()));
+                        return result.downloadMbps > 0 ? 'ok' : 'fail';
+                }, { signal, onProgress: (n) => setRetestDone(n) });
             }
+
+            // 任务数核对：有异常、中断或数量不一致时提示（已完成的结果照常保留并应用）
+            const latencyProblem = describePool('延迟复测', latencyStats);
+            const speedProblem = speedStats ? describePool('速度复测', speedStats) : null;
+            if (latencyProblem) showToast(latencyProblem, 'warning');
+            if (speedProblem) showToast(speedProblem, 'warning');
 
             // 把复测得到的新数据写进列表（失败项保持原值，只做标记）
             if (updates.size > 0) {
